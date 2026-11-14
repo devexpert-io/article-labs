@@ -1,0 +1,456 @@
+diff --git a/README.md b/README.md
+index 256e5c2..fa349db 100644
+--- a/README.md
++++ b/README.md
+@@ -44,6 +44,7 @@ En el club siempre es miércoles 18 de noviembre de 2026 a las 10:00, salvo que
+ ### Reservas
+ 
+ - `GET /api/reservas`: lista reservas con filtros opcionales `fecha`, `desde`, `hasta` (por día de inicio, ambos incluidos), `socio`, `pista` y `estado` (`confirmada`, `cancelada` o `no_presentada`), paginada con `limite` (1 a 100, 50 por defecto) y `pagina`. Responde `{ total, pagina, paginas, reservas }`.
++- `GET /api/reservas/exportar?desde=AAAA-MM-DD&hasta=AAAA-MM-DD[&estado=<estado>]`: exporta a CSV las reservas que empiezan en el periodo, ambos días incluidos. Solo pueden exportar los gestores: sin cabecera `X-Socio` responde `401 NO_IDENTIFICADO` y con un socio que no es gestor, `403 SIN_PERMISO`. Responde `200` con `content-type: text/csv; charset=utf-8` y `content-disposition: attachment; filename="reservas-<desde>-<hasta>.csv"`. La primera línea es `id,fecha,hora,pista,socio,email,estado,importe,penalizacion,notas`; hay una fila por reserva, ordenadas por inicio y, a igual inicio, por pista. `fecha` es el día (`AAAA-MM-DD`) y `hora` la de inicio (`HH:MM`); `pista` es el nombre; `importe` y `penalizacion` van en euros con dos decimales y punto, y `penalizacion` queda vacía si no la hay. Los campos con comas, comillas o saltos de línea van entre comillas dobles (RFC 4180) y todas las líneas terminan en CRLF. Errores: `DATOS_INVALIDOS` si faltan o no valen las fechas, si `desde` es posterior a `hasta` o si `estado` no es válido; `RANGO_DEMASIADO_GRANDE` si el periodo pasa de 92 días contando los dos extremos.
+ - `GET /api/reservas/:id`: una reserva. Responde `{ reserva }`.
+ - `POST /api/reservas` con `{ socioId, pistaId, inicio, notas? }`: crea una reserva. Responde `201 { reserva }`. Errores: `SOCIO_NO_ENCONTRADO`, `PISTA_NO_ENCONTRADA`, `FRANJA_INVALIDA`, `CUOTA_INACTIVA`, `PISTA_CERRADA`, `FRANJA_PASADA`, `FRANJA_NO_DISPONIBLE` y `LIMITE_DE_RESERVAS`.
+ - `POST /api/reservas/:id/cancelar` con `{ forzar?, motivo? }`: cancela una reserva. Responde `{ reserva }`. Errores: `RESERVA_NO_ENCONTRADA`, `YA_CANCELADA`, `RESERVA_PASADA` y `FUERA_DE_PLAZO`.
+diff --git a/src/nucleo.ts b/src/nucleo.ts
+index 62ed37b..852a192 100644
+--- a/src/nucleo.ts
++++ b/src/nucleo.ts
+@@ -1,6 +1,6 @@
+ // Las operaciones del club y sus reglas. La API HTTP (src/servidor.ts) es la única que las llama.
+ import { finDeFranja, HORAS, precio } from "./semilla.ts";
+-import type { Estado, EstadoReserva, Reserva } from "./tipos.ts";
++import type { Estado, EstadoReserva, Reserva, Socio } from "./tipos.ts";
+ 
+ export class ErrorDelClub extends Error {
+   codigo: string;
+@@ -18,17 +18,36 @@ export const LIMITE_MAXIMO = 100;
+ export const LIMITE_POR_DEFECTO = 50;
+ export const MAXIMO_RESERVAS_FUTURAS = 3;
+ export const HORAS_CANCELACION_GRATUITA = 24;
++export const DIAS_MAXIMOS_EXPORTACION = 92;
+ 
+ function invalido(mensaje: string): never {
+   throw new ErrorDelClub("DATOS_INVALIDOS", mensaje, 400);
+ }
+ 
++function horasEntre(desde: string, hasta: string): number {
++  return (Date.parse(`${hasta}:00Z`) - Date.parse(`${desde}:00Z`)) / 3_600_000;
++}
++
+ function sinAcentos(texto: string): string {
+   return texto.toLowerCase().normalize("NFD").replace(/[̀-ͯ]/g, "");
+ }
+ 
+-function horasEntre(desde: string, hasta: string): number {
+-  return (Date.parse(`${hasta}:00Z`) - Date.parse(`${desde}:00Z`)) / 3_600_000;
++/** Una fecha AAAA-MM-DD que además existe en el calendario. */
++function fechaValida(valor: unknown): valor is string {
++  if (typeof valor !== "string" || !FECHA.test(valor)) return false;
++  const fecha = new Date(`${valor}T00:00:00Z`);
++  // V8 normaliza días imposibles (2026-02-31 → 2026-03-03), así que se comprueba la vuelta.
++  return !Number.isNaN(fecha.getTime()) && fecha.toISOString().slice(0, 10) === valor;
++}
++
++/** Un campo CSV según el RFC 4180: solo se entrecomilla si lleva coma, comillas o salto de línea. */
++function campoCsv(valor: string): string {
++  return /[",\r\n]/.test(valor) ? `"${valor.replaceAll('"', '""')}"` : valor;
++}
++
++/** Céntimos de euro a euros con dos decimales y punto decimal. */
++function euros(centimos: number): string {
++  return (centimos / 100).toFixed(2);
+ }
+ 
+ export interface FiltrosReservas {
+@@ -121,6 +140,58 @@ export function crearClub(estado: Estado) {
+       return { total: todas.length, pagina, paginas, reservas: todas.slice((pagina - 1) * limite, pagina * limite) };
+     },
+ 
++    exportarReservas(datos: { desde?: unknown; hasta?: unknown; estado?: unknown }, quien: Socio | undefined) {
++      if (!quien) throw new ErrorDelClub("NO_IDENTIFICADO", "Hace falta la cabecera X-Socio para exportar", 401);
++      if (quien.rol !== "gestor") throw new ErrorDelClub("SIN_PERMISO", "Solo los gestores pueden exportar reservas", 403);
++
++      const { desde, hasta, estado: filtroEstado } = datos;
++      if (!fechaValida(desde)) invalido("desde es obligatorio, con el formato AAAA-MM-DD");
++      if (!fechaValida(hasta)) invalido("hasta es obligatorio, con el formato AAAA-MM-DD");
++      if (desde > hasta) invalido("desde no puede ser posterior a hasta");
++      const dias = (Date.parse(`${hasta}T00:00:00Z`) - Date.parse(`${desde}T00:00:00Z`)) / 86_400_000 + 1;
++      if (dias > DIAS_MAXIMOS_EXPORTACION) {
++        throw new ErrorDelClub(
++          "RANGO_DEMASIADO_GRANDE",
++          `El periodo puede abarcar como mucho ${DIAS_MAXIMOS_EXPORTACION} días contando los dos extremos`,
++          400,
++        );
++      }
++      if (filtroEstado !== undefined && !["confirmada", "cancelada", "no_presentada"].includes(filtroEstado as string)) {
++        invalido('estado debe ser "confirmada", "cancelada" o "no_presentada"');
++      }
++
++      const reservas = estado.reservas
++        .filter((r) =>
++          r.inicio.slice(0, 10) >= desde &&
++          r.inicio.slice(0, 10) <= hasta &&
++          (!filtroEstado || r.estado === (filtroEstado as EstadoReserva)))
++        .sort((a, b) => {
++          if (a.inicio !== b.inicio) return a.inicio < b.inicio ? -1 : 1;
++          if (a.pistaId !== b.pistaId) return a.pistaId < b.pistaId ? -1 : 1;
++          return 0;
++        });
++
++      const lineas = ["id,fecha,hora,pista,socio,email,estado,importe,penalizacion,notas"];
++      for (const r of reservas) {
++        const p = estado.pistas.find((x) => x.id === r.pistaId);
++        const s = estado.socios.find((x) => x.id === r.socioId);
++        const campos = [
++          r.id,
++          r.inicio.slice(0, 10),
++          r.inicio.slice(11, 16),
++          p?.nombre ?? r.pistaId,
++          s?.nombre ?? r.socioId,
++          s?.email ?? "",
++          r.estado,
++          euros(r.importe),
++          r.penalizacion === undefined ? "" : euros(r.penalizacion),
++          r.notas,
++        ];
++        lineas.push(campos.map((campo) => campoCsv(campo)).join(","));
++      }
++      return { csv: lineas.map((linea) => `${linea}\r\n`).join(""), desde, hasta };
++    },
++
+     obtenerReserva(id: string) {
+       return { reserva: reserva(id) };
+     },
+diff --git a/src/servidor.ts b/src/servidor.ts
+index a6a7764..da99396 100644
+--- a/src/servidor.ts
++++ b/src/servidor.ts
+@@ -42,10 +42,16 @@ function identificar(req: IncomingMessage): Socio | undefined {
+   return socio;
+ }
+ 
+-type Operacion = { nombre: string; argumentos: unknown; ejecutar: () => unknown };
++type Operacion = {
++  nombre: string;
++  argumentos: unknown;
++  ejecutar: () => unknown;
++  /** Si está, la respuesta no es JSON: la construye esta función. */
++  crudo?: (resultado: unknown) => { http: number; cabeceras: Record<string, string>; cuerpo: string };
++};
+ 
+-// `quien` es el socio que hace la petición (cabecera X-Socio). Las operaciones actuales no lo usan.
+-async function resolver(req: IncomingMessage, url: URL, _quien: Socio | undefined): Promise<Operacion> {
++// `quien` es el socio que hace la petición (cabecera X-Socio). Solo la exportación lo usa.
++async function resolver(req: IncomingMessage, url: URL, quien: Socio | undefined): Promise<Operacion> {
+   const metodo = req.method ?? "GET";
+   const partes = url.pathname.split("/").filter(Boolean);
+   const q = url.searchParams;
+@@ -84,6 +90,25 @@ async function resolver(req: IncomingMessage, url: URL, _quien: Socio | undefine
+     const cuerpo = await leerCuerpo(req);
+     return { nombre: "crearReserva", argumentos: cuerpo, ejecutar: () => club.crearReserva(cuerpo) };
+   }
++  if (recurso === "reservas" && id === "exportar" && !accion && metodo === "GET") {
++    const argumentos = { desde: q.get("desde") ?? undefined, hasta: q.get("hasta") ?? undefined, estado: q.get("estado") ?? undefined };
++    return {
++      nombre: "exportarReservas",
++      argumentos,
++      ejecutar: () => club.exportarReservas(argumentos, quien),
++      crudo: (resultado) => {
++        const { csv, desde, hasta } = resultado as { csv: string; desde: string; hasta: string };
++        return {
++          http: 200,
++          cabeceras: {
++            "content-type": "text/csv; charset=utf-8",
++            "content-disposition": `attachment; filename="reservas-${desde}-${hasta}.csv"`,
++          },
++          cuerpo: csv,
++        };
++      },
++    };
++  }
+   if (recurso === "reservas" && id && !accion && metodo === "GET") {
+     return { nombre: "obtenerReserva", argumentos: { reservaId: id }, ejecutar: () => club.obtenerReserva(id) };
+   }
+@@ -100,6 +125,10 @@ const servidor = createServer(async (req, res) => {
+     res.writeHead(http, { "content-type": "application/json; charset=utf-8" });
+     res.end(JSON.stringify(datos));
+   };
++  const responderCrudo = (r: { http: number; cabeceras: Record<string, string>; cuerpo: string }) => {
++    res.writeHead(r.http, r.cabeceras);
++    res.end(r.cuerpo);
++  };
+ 
+   // Solo para pruebas: el estado completo y el reloj del club.
+   if (url.pathname === "/_estado" && req.method === "GET") return responder(200, estado);
+@@ -131,7 +160,8 @@ const servidor = createServer(async (req, res) => {
+     operacion = await resolver(req, url, quien);
+     const resultado = operacion.ejecutar();
+     anotar(true);
+-    responder(operacion.nombre === "crearReserva" ? 201 : 200, resultado);
++    if (operacion.crudo) responderCrudo(operacion.crudo(resultado));
++    else responder(operacion.nombre === "crearReserva" ? 201 : 200, resultado);
+   } catch (error) {
+     if (error instanceof ErrorDelClub) {
+       anotar(false, error.codigo);
+diff --git a/test/exportar-csv.test.ts b/test/exportar-csv.test.ts
+new file mode 100644
+index 0000000..fbf32a5
+--- /dev/null
++++ b/test/exportar-csv.test.ts
+@@ -0,0 +1,257 @@
++// La exportación de reservas a CSV, probada a través de la API.
++import assert from "node:assert/strict";
++import { after, before, test } from "node:test";
++import { arrancarApi, type Api } from "./ayuda.ts";
++
++const GESTOR = "socio-040";
++const SOCIO = "socio-002";
++const CABECERA = "id,fecha,hora,pista,socio,email,estado,importe,penalizacion,notas";
++
++let api: Api;
++before(async () => {
++  api = await arrancarApi();
++});
++after(() => api.cerrar());
++
++function exportar(consulta: string, socio?: string) {
++  return api.pedir("GET", `/api/reservas/exportar${consulta}`, socio === undefined ? {} : { socio });
++}
++
++async function leerEstado(): Promise<any> {
++  return (await api.pedir("GET", "/_estado")).cuerpo;
++}
++
++/** Parser mínimo del RFC 4180, para no trocear por CRLF campos que llevan saltos de línea. */
++function parsearCsv(texto: string): string[][] {
++  const filas: string[][] = [];
++  let fila: string[] = [];
++  let campo = "";
++  let entreComillas = false;
++  for (let i = 0; i < texto.length; i++) {
++    const c = texto[i]!;
++    if (entreComillas) {
++      if (c === '"') {
++        if (texto[i + 1] === '"') {
++          campo += '"';
++          i++;
++        } else {
++          entreComillas = false;
++        }
++      } else {
++        campo += c;
++      }
++    } else if (c === '"') {
++      entreComillas = true;
++    } else if (c === ",") {
++      fila.push(campo);
++      campo = "";
++    } else if (c === "\r" && texto[i + 1] === "\n") {
++      fila.push(campo);
++      campo = "";
++      filas.push(fila);
++      fila = [];
++      i++;
++    } else {
++      campo += c;
++    }
++  }
++  if (campo !== "" || fila.length > 0) {
++    fila.push(campo);
++    filas.push(fila);
++  }
++  return filas;
++}
++
++function compararInicio(a: any, b: any): number {
++  if (a.inicio !== b.inicio) return a.inicio < b.inicio ? -1 : 1;
++  if (a.pistaId !== b.pistaId) return a.pistaId < b.pistaId ? -1 : 1;
++  return 0;
++}
++
++/** Las filas que la exportación debe devolver según el estado del club, sin pasar por el CSV. */
++function filasEsperadas(e: any, desde: string, hasta: string, estado?: string): string[][] {
++  const pistas = new Map(e.pistas.map((p: any) => [p.id, p]));
++  const socios = new Map(e.socios.map((s: any) => [s.id, s]));
++  return e.reservas
++    .filter((r: any) =>
++      r.inicio.slice(0, 10) >= desde &&
++      r.inicio.slice(0, 10) <= hasta &&
++      (!estado || r.estado === estado))
++    .sort(compararInicio)
++    .map((r: any) => [
++      r.id,
++      r.inicio.slice(0, 10),
++      r.inicio.slice(11, 16),
++      (pistas.get(r.pistaId) as any).nombre,
++      (socios.get(r.socioId) as any).nombre,
++      (socios.get(r.socioId) as any).email,
++      r.estado,
++      (r.importe / 100).toFixed(2),
++      r.penalizacion === undefined ? "" : (r.penalizacion / 100).toFixed(2),
++      r.notas,
++    ]);
++}
++
++/** Un hueco libre futuro de una pista operativa, para crear reservas en las pruebas. */
++async function huecoLibre(): Promise<{ pistaId: string; inicio: string }> {
++  const e = await leerEstado();
++  for (const fecha of ["2026-11-22", "2026-11-23", "2026-11-24"]) {
++    for (const p of e.pistas.filter((pista: any) => pista.estado === "operativa")) {
++      for (const hora of ["09:00", "10:30", "12:00", "13:30", "15:00", "16:30", "18:00", "19:30", "21:00"]) {
++        const inicio = `${fecha}T${hora}`;
++        const ocupada = e.reservas.some((r: any) => r.pistaId === p.id && r.inicio === inicio && r.estado === "confirmada");
++        if (!ocupada) return { pistaId: p.id, inicio };
++      }
++    }
++  }
++  throw new Error("No hay huecos libres para la prueba");
++}
++
++test("permisos: sin X-Socio es 401 y con un socio normal es 403", async () => {
++  const sinIdentificar = await exportar("?desde=2026-11-19&hasta=2026-11-19");
++  assert.equal(sinIdentificar.status, 401);
++  assert.equal(sinIdentificar.cuerpo.error.codigo, "NO_IDENTIFICADO");
++
++  const sinPermiso = await exportar("?desde=2026-11-19&hasta=2026-11-19", SOCIO);
++  assert.equal(sinPermiso.status, 403);
++  assert.equal(sinPermiso.cuerpo.error.codigo, "SIN_PERMISO");
++
++  // El permiso se comprueba antes que los datos del periodo.
++  const sinPermisoNiPeriodo = await exportar("?estado=lo-que-sea", SOCIO);
++  assert.equal(sinPermisoNiPeriodo.status, 403);
++  assert.equal(sinPermisoNiPeriodo.cuerpo.error.codigo, "SIN_PERMISO");
++
++  assert.equal((await exportar("?desde=2026-11-19&hasta=2026-11-19", GESTOR)).status, 200);
++});
++
++test("respuesta: 200, texto CSV y nombre de fichero con el periodo", async () => {
++  const r = await exportar("?desde=2026-11-19&hasta=2026-11-21", GESTOR);
++  assert.equal(r.status, 200);
++  assert.equal(r.cabeceras.get("content-type"), "text/csv; charset=utf-8");
++  assert.equal(r.cabeceras.get("content-disposition"), 'attachment; filename="reservas-2026-11-19-2026-11-21.csv"');
++  assert.equal(typeof r.cuerpo, "string", "el cuerpo no es JSON");
++});
++
++test("cabecera: la primera línea es la exacta, con las columnas en orden", async () => {
++  const { texto } = await exportar("?desde=2026-11-19&hasta=2026-11-19", GESTOR);
++  assert.equal(texto.split("\r\n")[0], CABECERA);
++  assert.deepEqual(parsearCsv(texto)[0], [
++    "id", "fecha", "hora", "pista", "socio", "email", "estado", "importe", "penalizacion", "notas",
++  ]);
++});
++
++test("filas: una por reserva del periodo, ordenadas por inicio y luego por pista", async () => {
++  const r = await exportar("?desde=2026-11-18&hasta=2026-11-24", GESTOR);
++  const filas = parsearCsv(r.texto).slice(1);
++  const estado = await leerEstado();
++  assert.deepEqual(filas, filasEsperadas(estado, "2026-11-18", "2026-11-24"));
++  assert.ok(filas.length > 0);
++
++  // El orden es por inicio y, a igual inicio, por id de pista (no por nombre).
++  const inicios = filas.map((f) => `${f[1]}T${f[2]}`);
++  assert.deepEqual(inicios, [...inicios].sort());
++  const mismoInicio = filas.filter((f) => `${f[1]}T${f[2]}` === "2026-11-21T15:00");
++  assert.ok(mismoInicio.length > 1);
++  assert.deepEqual(mismoInicio.map((f) => f[3]), [...mismoInicio.map((f) => f[3])].sort((a, b) => a.localeCompare(b)));
++});
++
++test("importes: euros con dos decimales y punto; penalización vacía si no la hay", async () => {
++  const cancelada = await api.pedir("POST", "/api/reservas/R-0520/cancelar", { cuerpo: { forzar: true } });
++  assert.equal(cancelada.status, 200);
++  assert.equal(cancelada.cuerpo.reserva.penalizacion, 1200);
++
++  const { texto } = await exportar("?desde=2026-11-19&hasta=2026-11-19", GESTOR);
++  const filas = parsearCsv(texto);
++  const conPenalizacion = filas.find((f) => f[0] === "R-0520");
++  assert.ok(conPenalizacion);
++  assert.equal(conPenalizacion[6], "cancelada");
++  assert.equal(conPenalizacion[7], "12.00");
++  assert.equal(conPenalizacion[8], "12.00");
++
++  const sinPenalizacion = filas.find((f) => f[0] !== "R-0520" && f[6] === "confirmada");
++  assert.ok(sinPenalizacion);
++  assert.equal(sinPenalizacion[8], "");
++  assert.match(sinPenalizacion[7]!, /^\d+\.\d{2}$/);
++});
++
++test("escapado: comas, comillas y saltos de línea siguen el RFC 4180", async () => {
++  const { pistaId, inicio } = await huecoLibre();
++  const notas = 'Pista, "central"\nsegunda línea';
++  const creada = await api.pedir("POST", "/api/reservas", {
++    cuerpo: { socioId: "socio-041", pistaId, inicio, notas },
++  });
++  assert.equal(creada.status, 201);
++  const id = creada.cuerpo.reserva.id;
++
++  const dia = inicio.slice(0, 10);
++  const { texto } = await exportar(`?desde=${dia}&hasta=${dia}`, GESTOR);
++  assert.ok(texto.includes('"Pista, ""central""\nsegunda línea"'));
++
++  const filas = parsearCsv(texto);
++  const fila = filas.find((f) => f[0] === id);
++  assert.ok(fila);
++  assert.equal(fila[9], notas, "el parser recupera las notas originales");
++  const estado = await leerEstado();
++  assert.deepEqual(filas.slice(1), filasEsperadas(estado, dia, dia));
++
++  // Un campo sin caracteres especiales no se entrecomilla.
++  assert.ok(texto.includes(",Pista 1,"));
++  const otroDia = await exportar("?desde=2026-11-19&hasta=2026-11-19", GESTOR);
++  assert.ok(otroDia.texto.includes(",Traen sus propias palas. Piden bolas nuevas.\r\n"));
++
++  // Una coma suelta en un campo sí obliga a entrecomillar.
++  assert.ok(texto.includes(`"Pista, ""central""`));
++});
++
++test("fin de línea: todas las líneas, también la última, terminan en CRLF", async () => {
++  const { texto } = await exportar("?desde=2026-11-19&hasta=2026-11-19", GESTOR);
++  assert.ok(texto.endsWith("\r\n"));
++  const filas = parsearCsv(texto);
++  assert.equal((texto.match(/\r\n/g) ?? []).length, filas.length);
++  assert.equal(texto.replaceAll("\r\n", "").includes("\n"), false, "no hay saltos de línea sueltos");
++});
++
++test("periodo: obligatorio, con formato, ordenado y de 92 días como mucho", async () => {
++  const casos = [
++    "?hasta=2026-11-19",
++    "?desde=2026-11-19",
++    "?desde=19%2F11%2F2026&hasta=2026-11-19",
++    "?desde=2026-11-20&hasta=2026-11-19",
++    "?desde=2026-02-31&hasta=2026-03-01",
++  ];
++  for (const consulta of casos) {
++    const r = await exportar(consulta, GESTOR);
++    assert.equal(r.status, 400, consulta);
++    assert.equal(r.cuerpo.error.codigo, "DATOS_INVALIDOS", consulta);
++  }
++
++  // 92 días contando los dos extremos: 2026-09-01 a 2026-12-01.
++  const justo = await exportar("?desde=2026-09-01&hasta=2026-12-01", GESTOR);
++  assert.equal(justo.status, 200);
++
++  const largo = await exportar("?desde=2026-08-31&hasta=2026-12-01", GESTOR);
++  assert.equal(largo.status, 400);
++  assert.equal(largo.cuerpo.error.codigo, "RANGO_DEMASIADO_GRANDE");
++});
++
++test("filtro por estado: opcional y solo con los valores del club", async () => {
++  const r = await exportar("?desde=2026-10-01&hasta=2026-10-31&estado=cancelada", GESTOR);
++  assert.equal(r.status, 200);
++  const filas = parsearCsv(r.texto).slice(1);
++  assert.ok(filas.length > 0);
++  assert.ok(filas.every((f) => f[6] === "cancelada"));
++  assert.deepEqual(filas, filasEsperadas(await leerEstado(), "2026-10-01", "2026-10-31", "cancelada"));
++
++  const invalido = await exportar("?desde=2026-10-01&hasta=2026-10-31&estado=pendiente", GESTOR);
++  assert.equal(invalido.status, 400);
++  assert.equal(invalido.cuerpo.error.codigo, "DATOS_INVALIDOS");
++});
++
++test("lo demás no cambia: GET /api/reservas sigue igual", async () => {
++  const r = await api.pedir("GET", "/api/reservas?fecha=2026-11-19&limite=100");
++  assert.equal(r.status, 200);
++  assert.equal(r.cabeceras.get("content-type"), "application/json; charset=utf-8");
++  assert.deepEqual(Object.keys(r.cuerpo).sort(), ["pagina", "paginas", "reservas", "total"]);
++  const estado = await leerEstado();
++  assert.equal(r.cuerpo.total, estado.reservas.filter((x: any) => x.inicio.slice(0, 10) === "2026-11-19").length);
++});
