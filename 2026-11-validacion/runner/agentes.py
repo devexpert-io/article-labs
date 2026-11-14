@@ -178,6 +178,11 @@ def metricas_claude(log: Path) -> dict:
         if e.get("type") == "system" and e.get("subtype") == "init":
             m["modelo_real"] = e.get("model")
             m["sesion"] = e.get("session_id")
+        if e.get("type") == "rate_limit_event":
+            # Cuánto lleva gastado la cuenta de su cuota: sirve para planificar los lotes, no entra en los resultados.
+            info = e.get("rate_limit_info") or {}
+            ventanas = info.get("unifiedWindows") or {info.get("rateLimitType"): info}
+            m["cuota"] = {k: {"uso": v.get("utilization"), "estado": v.get("status")} for k, v in ventanas.items() if k}
         if e.get("type") == "assistant":
             msg = e.get("message", {})
             if msg.get("id") not in vistos:

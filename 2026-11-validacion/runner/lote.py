@@ -16,6 +16,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import agentes  # noqa: E402
 import cadena  # noqa: E402
 
+DIFICILES = {"duraciones", "reservas-fijas", "facturas"}
+
 
 def sincronizar_auth_codex() -> None:
     """Codex renueva su token en la copia del laboratorio: la más reciente se copia a la otra."""
@@ -37,6 +39,8 @@ def main() -> None:
     a.add_argument("--encargos", required=True)
     a.add_argument("--configs", required=True)
     a.add_argument("--reps", default="1", help="número de repeticiones (1..N) o lista: 2,3")
+    a.add_argument("--reps-dificiles", type=int, default=None,
+                   help="repeticiones de los encargos difíciles, si son otras (van primero)")
     a.add_argument("--condiciones", default="ABCD")
     a.add_argument("--hilos", type=int, default=6)
     a.add_argument("--claude", type=int, default=2)
@@ -47,7 +51,13 @@ def main() -> None:
     agentes.limitar("codex", args.codex)
     agentes.limitar("opencode", args.opencode)
     reps = [int(x) for x in args.reps.split(",")] if "," in args.reps else list(range(1, int(args.reps) + 1))
-    trabajos = [(e, c, r) for r in reps for e in args.encargos.split(",") for c in args.configs.split(",")]
+    encargos = args.encargos.split(",")
+    if args.reps_dificiles:
+        encargos.sort(key=lambda e: e not in DIFICILES)
+    reps_de = {e: list(range(1, args.reps_dificiles + 1)) if args.reps_dificiles and e in DIFICILES else reps
+               for e in encargos}
+    todas = sorted({r for rs in reps_de.values() for r in rs})
+    trabajos = [(e, c, r) for r in todas for e in encargos if r in reps_de[e] for c in args.configs.split(",")]
     registro = agentes.SCR / "lotes" / f"{args.lote}.log"
     registro.parent.mkdir(parents=True, exist_ok=True)
 
@@ -70,6 +80,8 @@ def main() -> None:
                        f"D {((res.get('D') or {}).get('veredicto') or {}).get('veredicto')} "
                        f"B {(res.get('B') or {}).get('veredicto_final')}->{fin['B']} "
                        f"C {(res.get('C') or {}).get('veredicto_final')}->{fin['C']}")
+            except cadena.FalloAjeno as ex:
+                anotar(f"AJENO {e}-{c}-r{r}: {ex} (sin guardar: se repite al relanzar el lote)")
             except Exception:
                 anotar(f"ERROR {e}-{c}-r{r}: {traceback.format_exc()[-1500:]}")
     sincronizar_auth_codex()

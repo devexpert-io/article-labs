@@ -58,6 +58,11 @@ El piloto (`resultados/piloto/`: `exportar-csv` y `lista-espera`, una repetició
 - **Tests que fallan por carga.** En el piloto, un test de `lista-espera` falló una vez sobre un código que lo pasa en todas las demás corridas, con la máquina cargada. Ahora, si falla algún test oculto, se repite la corrida, y un test cuenta como pasado si pasa en alguna de las dos. Los que cambian entre corridas quedan apuntados como `inestables`.
 - **Tokens de Claude Code.** Se toman del resultado final de cada ejecución, porque los mensajes intermedios del stream llevan el uso parcial.
 
+El piloto de los difíciles (`resultados/piloto-dificil/`: los tres encargos, una repetición, las cinco configuraciones) tampoco entra en los resultados. Salieron completas 14 de las 15 implementaciones. Con eso basta para lanzar el lote, así que el diseño no cambia. Solo cambia el runner:
+
+- **Fallos ajenos al agente.** Si una ejecución falla por la cuota, el límite de uso, la red o la autenticación, la cadena se corta, se anota como `AJENO` y no se guarda como terminada. No es un dato del experimento: al relanzar el lote, se repite entera.
+- **Versiones fijas.** Claude Code corre con `DISABLE_AUTOUPDATER=1` y OpenCode con `autoupdate: false`, para que ninguno cambie de versión a mitad de lote. Cada ejecución de Claude guarda además cuánta cuota llevaba gastada la cuenta, para planificar los lotes.
+
 ## Qué se mide
 
 **Principal**, por configuración:
@@ -97,9 +102,10 @@ Con 8 o 9 encargos por configuración y dificultad no hay potencia para pruebas 
 
 ```sh
 cd club && npm install && cd ..
-LAB_SCRATCH=/var/tmp/lab-validacion oprun python3 -I runner/lote.py <lote> \
-  --encargos exportar-csv,codigos-descuento,lista-espera,reembolsos \
-  --configs opus,sol,haiku,luna,deepseek --reps 3
+LAB_SCRATCH=/var/tmp/lab-validacion oprun python3 -I runner/lote.py completo \
+  --encargos exportar-csv,codigos-descuento,lista-espera,reembolsos,duraciones,reservas-fijas,facturas \
+  --configs opus,sol,haiku,luna,deepseek --reps 2 --reps-dificiles 3 --hilos 8
+python3 -I analisis/analizar.py completo
 ```
 
 Antes hay que preparar `$LAB_SCRATCH/codex-home` (un `config.toml` mínimo y tu `auth.json`) y `$LAB_SCRATCH/home-oc/.config/opencode/opencode.json` (el proveedor de NaN). Los resultados de cada cadena quedan en `resultados/<lote>/<cadena>.json`, con los diffs de lo que entregó cada agente.

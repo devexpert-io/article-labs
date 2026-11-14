@@ -19,6 +19,30 @@ import prompts
 from agentes import CONFIGS, LAB, SCR, VALIDADOR_FRONTERA, lanzar
 from calificar import copiar_estado, evaluar
 
+class FalloAjeno(RuntimeError):
+    """El agente no pudo trabajar por algo ajeno al experimento: cuota, límite de uso, red o autenticación."""
+
+
+AJENO = re.compile(
+    r"usage limit|hit your [^.\n]{0,40}limit|rate[ _-]?limit|too many requests|\b429\b|quota|"
+    r"insufficient[ _](balance|credit|funds)|\b402\b|overloaded|\b529\b|internal server error|bad gateway|"
+    r"service unavailable|\b50[234]\b|unauthori[sz]ed|\b401\b|authenticat|invalid api key|"
+    r"ECONNRESET|ENOTFOUND|ETIMEDOUT|network error|stream disconnected|connection (reset|refused|closed)", re.I)
+
+
+def comprobar(m: dict, paso: str) -> dict:
+    """Si la ejecución falló por algo ajeno al agente, la cadena se corta y no se guarda como terminada:
+    no es un dato del experimento, y al relanzar el lote se repite entera."""
+    texto = " ".join(str(m.get(k) or "") for k in ("error_agente", "respuesta_final", "stderr"))
+    rechazada = any((v or {}).get("estado") == "rejected" for v in (m.get("cuota") or {}).values())
+    if rechazada and (m.get("error_agente") or not m.get("salida")):
+        raise FalloAjeno(f"{paso} ({m.get('config')}): cuota agotada. {texto[:300]}")
+    if m.get("error_agente"):
+        if AJENO.search(texto) and (m.get("agente") == "claude" or m.get("rc") != 0 or not m.get("salida")):
+            raise FalloAjeno(f"{paso} ({m.get('config')}): {texto[:400]}")
+    return m
+
+
 GIT = ["git", "-c", "user.email=lab@example.com", "-c", "user.name=lab", "-c", "commit.gpgsign=false"]
 LIMITE_IMPLEMENTAR = 45 * 60
 LIMITE_VALIDAR = 25 * 60
@@ -82,7 +106,7 @@ def resumen(m: dict) -> dict:
     return {k: m.get(k) for k in (
         "config", "agente", "modelo", "modelo_real", "duracion_s", "rc", "sesion", "reanuda", "peticiones", "entrada",
         "entrada_cache_leida", "entrada_cache_escrita", "salida", "razonamiento", "coste_usd", "turnos",
-        "herramientas", "ordenes", "respuesta_final", "error_agente", "stderr")}
+        "herramientas", "ordenes", "respuesta_final", "error_agente", "stderr", "cuota")}
 
 
 def rama(nombre: str, impl: Path, base: Path, encargo: str, implementador: str, validador: str,
@@ -96,8 +120,8 @@ def rama(nombre: str, impl: Path, base: Path, encargo: str, implementador: str, 
     rondas = []
     evaluacion = evaluacion_inicial
     for ronda in range(1, MAX_REPARACIONES + 2):
-        v = lanzar(validador, prompts.validar(encargo), trabajo, logs / f"{nombre}-validar{ronda}.jsonl",
-                   limite_s=LIMITE_VALIDAR)
+        v = comprobar(lanzar(validador, prompts.validar(encargo), trabajo, logs / f"{nombre}-validar{ronda}.jsonl",
+                             limite_s=LIMITE_VALIDAR), f"{nombre}-validar{ronda}")
         veredicto = leer_veredicto(v.get("respuesta_final", ""))
         tocados = cambios_sin_fijar(trabajo)
         descartar(trabajo)
@@ -106,8 +130,8 @@ def rama(nombre: str, impl: Path, base: Path, encargo: str, implementador: str, 
         rondas.append(paso)
         if veredicto is None or veredicto["veredicto"] == "accept" or ronda > MAX_REPARACIONES:
             break
-        r = lanzar(implementador, prompts.reparar(encargo, veredicto), trabajo, logs / f"{nombre}-reparar{ronda}.jsonl",
-                   limite_s=LIMITE_REPARAR)
+        r = comprobar(lanzar(implementador, prompts.reparar(encargo, veredicto), trabajo,
+                             logs / f"{nombre}-reparar{ronda}.jsonl", limite_s=LIMITE_REPARAR), f"{nombre}-reparar{ronda}")
         paso["reparacion"] = resumen(r)
         paso["commit"] = fijar(trabajo, f"reparacion-{ronda}")
         evaluacion = evaluar(trabajo, encargo)
@@ -131,8 +155,8 @@ def ejecutar(lote: str, encargo: str, config: str, rep: int, condiciones: str = 
     preparar(impl)
     r = {"id": cid, "lote": lote, "encargo": encargo, "config": config, "rep": rep, **CONFIGS[config]}
 
-    m = lanzar(config, prompts.implementar(encargo), impl, logs / "implementar.jsonl", persistir=True,
-               limite_s=LIMITE_IMPLEMENTAR)
+    m = comprobar(lanzar(config, prompts.implementar(encargo), impl, logs / "implementar.jsonl", persistir=True,
+                         limite_s=LIMITE_IMPLEMENTAR), "implementar")
     r["implementacion"] = resumen(m)
     r["commit_implementacion"] = fijar(impl, "implementacion")
     (logs / "implementacion.diff").write_text(git(impl, "diff", "base", "HEAD"))
@@ -140,8 +164,8 @@ def ejecutar(lote: str, encargo: str, config: str, rep: int, condiciones: str = 
     guardar(destino, r)
 
     if "D" in condiciones and m.get("sesion"):
-        d = lanzar(config, prompts.validar(encargo), impl, logs / "D-validar.jsonl", reanudar=m["sesion"],
-                   limite_s=LIMITE_VALIDAR)
+        d = comprobar(lanzar(config, prompts.validar(encargo), impl, logs / "D-validar.jsonl", reanudar=m["sesion"],
+                             limite_s=LIMITE_VALIDAR), "D-validar")
         r["D"] = {"validacion": resumen(d), "veredicto": leer_veredicto(d.get("respuesta_final", "")),
                   "validador_toco": cambios_sin_fijar(impl)}
         descartar(impl)
