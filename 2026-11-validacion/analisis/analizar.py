@@ -129,9 +129,16 @@ def tabla_por_config(por_config: dict) -> dict:
             arreglados = sum(1 for c in cs if c[rama] and not c["A_completo"] and c[rama]["completo"])
             estropeados = sum(1 for c in cs if c[rama] and c["A_completo"] and not c[rama]["completo"])
             extra = suma((x["coste_validar"] or 0) + (x["coste_reparar"] or 0) if x["coste_validar"] is not None else None for x in rs)
+            completos_validados = [c for c in cs if c[rama] and c["A_completo"]]
             fila[rama] = {
                 "completos": sum(x["completo"] for x in rs), "arreglados": arreglados, "estropeados": estropeados,
                 "coste_extra": extra, "minutos_extra": sum(x["minutos"] for x in rs),
+                "pct_extra": (100 * extra / fila["coste_implementar"]) if extra is not None and fila["coste_implementar"] else None,
+                # Trabajo que ya estaba completo y por el que el validador pidió cambios: reparaciones que no hacían falta.
+                "completos_validados": len(completos_validados),
+                "cambios_en_completos": sum(1 for c in completos_validados
+                                            if c[rama]["deteccion_primera"]["veredicto"] in ("revise", "block")),
+                "reparaciones_en_completos": sum(c[rama]["reparaciones"] for c in completos_validados),
                 "coste_por_arreglado": (extra / arreglados) if extra is not None and arreglados else None,
                 "compensa": arreglados >= 2 and estropeados == 0 and arreglados > estropeados,
                 "deteccion": {k: sum(x["deteccion_primera"][k] for x in rs) for k in ("fallos", "cazados", "falsas_alarmas")},
@@ -142,6 +149,10 @@ def tabla_por_config(por_config: dict) -> dict:
         if ds:
             fila["D"] = {k: sum(d[k] for d in ds) for k in ("fallos", "cazados", "falsas_alarmas")}
             fila["D"]["accept_con_fallos"] = sum(d["accept_con_fallos"] for d in ds)
+            fila["D"]["coste"] = suma(c["D_coste"] for c in cs if c["D"])
+            fila["D"]["completos_validados"] = sum(1 for c in cs if c["D"] and c["A_completo"])
+            fila["D"]["cambios_en_completos"] = sum(1 for c in cs if c["D"] and c["A_completo"]
+                                                    and c["D"]["veredicto"] in ("revise", "block"))
         tabla[config] = fila
     return tabla
 
@@ -171,6 +182,18 @@ def tabla_md(tabla: dict, fmt) -> list[str]:
         lineas.append(f"| {config} | {f['n']} | {f['A_completos']} | {b.get('completos', '—')} | "
                       f"{b.get('arreglados', '—')}/{b.get('estropeados', '—')} | {fmt(b.get('coste_extra'))} | "
                       f"{c.get('completos', '—')} | {c.get('arreglados', '—')}/{c.get('estropeados', '—')} | {fmt(c.get('coste_extra'))} |")
+    pct = lambda v: "—" if v is None else f"{v:.0f} %"  # noqa: E731
+    lineas += ["", "Lo que cuesta validar (B y C, con sus reparaciones):", "",
+               "| Config | Cond. | Coste extra | Sobre implementar | Minutos extra | Coste por arreglado | ¿Compensa? | Cambios pedidos en trabajo completo | Reparaciones innecesarias | El validador tocó código |",
+               "|---|---|---|---|---|---|---|---|---|---|"]
+    for config, f in tabla.items():
+        for cond in ("B", "C"):
+            d = f.get(cond)
+            if not d:
+                continue
+            lineas.append(f"| {config} | {cond} | {fmt(d['coste_extra'])} | {pct(d['pct_extra'])} | {d['minutos_extra']:.0f} | "
+                          f"{fmt(d['coste_por_arreglado'])} | {'sí' if d['compensa'] else 'no'} | "
+                          f"{d['cambios_en_completos']}/{d['completos_validados']} | {d['reparaciones_en_completos']} | {d['validador_toco']} |")
     lineas += ["", "Detección (primera validación):", "",
                "| Config | Condición | Fallos | Cazados | Falsas alarmas | accept con fallos |", "|---|---|---|---|---|---|"]
     for config, f in tabla.items():
@@ -181,6 +204,11 @@ def tabla_md(tabla: dict, fmt) -> list[str]:
             det = d if cond == "D" else d["deteccion"]
             acf = d["accept_con_fallos"]
             lineas.append(f"| {config} | {cond} | {det['fallos']} | {det['cazados']} | {det['falsas_alarmas']} | {acf} |")
+    ds = [(config, f["D"]) for config, f in tabla.items() if f.get("D")]
+    if ds:
+        lineas += ["", "La misma sesión (D, solo detecta):", "", "| Config | Coste | Cambios pedidos en trabajo completo |", "|---|---|---|"]
+        for config, d in ds:
+            lineas.append(f"| {config} | {fmt(d['coste'])} | {d['cambios_en_completos']}/{d['completos_validados']} |")
     return lineas
 
 
