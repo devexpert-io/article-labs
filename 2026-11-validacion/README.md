@@ -82,7 +82,7 @@ Lo que cambia respecto al lote completo:
 
 Lo que no cambia: los cinco modelos y las versiones de sus agentes, los prompts y el protocolo de validación, el máximo de dos reparaciones, la verdad de referencia (tests ocultos por criterio, una referencia que los pasa todos y una base que los suspende salvo los de "lo demás no cambia") y la regla de "compensa", que aquí se aplica a las 6 implementaciones de cada configuración.
 
-- **Los tests ocultos y las referencias** los escribieron agentes distintos (Claude Opus 5.5) a partir de la spec, sin ver unos el trabajo de los otros. Donde no coincidían, se decidió con el texto de la spec antes de ejecutar nada.
+- **Los tests ocultos y las referencias** los escribieron agentes distintos (Claude Opus 5.5) a partir de la spec, sin ver unos el trabajo de los otros. Coincidieron del todo: cada referencia pasa todos los tests ocultos de su encargo (110 en `torneos` y 90 en `partidos-abiertos`), y la base solo los de "lo demás no cambia". Los dos agentes de los tests comprobaron además sus tests con una implementación propia y con fallos metidos a propósito (30 en `torneos` y 50 en `partidos-abiertos`): cada fallo lo caza su criterio.
 - **La revisión a mano y la vara ampliada** se hacen como en el lote completo (`analisis/revision/` y la regla de `analisis/ampliados/gravedad.json`), después de ver los datos, y se dan aparte.
 - **Piloto:** antes del lote, una implementación de cada configuración y encargo, solo con A, para comprobar los tiempos y el corrector. No entra en los resultados.
 
