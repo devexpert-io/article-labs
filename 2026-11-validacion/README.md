@@ -3,6 +3,8 @@
 Experimento del artículo de DevExpert sobre cómo validar el trabajo de un agente de programación (noviembre de 2026). La pregunta: ¿compensa añadir un validador de IA al flujo, o con los modelos potentes es gastar tokens? ¿Cambia la respuesta según lo potente que sea el modelo que implementa?
 
 > **Estado:** diseño fijado el 14 de noviembre de 2026, antes de lanzar el lote completo. Esta sección no se toca después de ver los datos. Los resultados irán en su propia sección.
+>
+> **Resultados:** el lote completo terminó el 15 de noviembre. Ver [Resultados](#resultados).
 
 ## Diseño
 
@@ -108,7 +110,162 @@ LAB_SCRATCH=/var/tmp/lab-validacion oprun python3 -I runner/lote.py completo \
 python3 -I analisis/analizar.py completo
 ```
 
+La revisión a mano y la vara ampliada, que se hicieron después:
+
+```sh
+python3 -I analisis/revision/paquetes.py analisis/revision/paquetes   # los hallazgos que había que revisar
+python3 -I analisis/revision/agregar.py                               # el recuento de las clasificaciones
+for e in codigos-descuento duraciones exportar-csv facturas lista-espera reservas-fijas; do
+  LAB_SCRATCH=/var/tmp/lab-validacion python3 -I analisis/ampliar.py $e ocultos-ampliados/$e.test.ts analisis/ampliados/$e.json
+done
+python3 -I analisis/agregar_ampliados.py mayor                        # o todas
+LAB_SCRATCH=/var/tmp/lab-validacion python3 -I analisis/semilla/comparar.py   # ¿alguien tocó la semilla?
+```
+
+`ampliar.py` y `comparar.py` corren contra las carpetas de cada ejecución en `$LAB_SCRATCH`. Sin ellas, cada estado se puede reconstruir aplicando a `club/` su diff de `resultados/completo/<cadena>/`.
+
 Antes hay que preparar `$LAB_SCRATCH/codex-home` (un `config.toml` mínimo y tu `auth.json`) y `$LAB_SCRATCH/home-oc/.config/opencode/opencode.json` (el proveedor de NaN). Los resultados de cada cadena quedan en `resultados/<lote>/<cadena>.json`, con los diffs de lo que entregó cada agente.
+
+## Resultados
+
+Lote `completo`, del 14 de noviembre a las 23:06 al 15 a la 1:57: 85 cadenas, ninguna cortada por cuota, red o autenticación. Claude Code no cambió de versión en ninguna de sus 171 ejecuciones (2.1.325). El coste total, a precio de API, fue de 61,81 $ (Claude 42,32 $, Codex 13,41 $ y OpenCode 6,08 $). Las tablas completas, por dificultad y cadena a cadena, están en `analisis/completo.md`.
+
+### Encargos completos
+
+| Config | Nivel | Sin validador (A) | Al final de B | Al final de C |
+|---|---|---|---|---|
+| `opus` | frontera | 16 de 17 | 16 | — |
+| `sol` | frontera | 17 de 17 | 17 | — |
+| `haiku` | barato | 17 de 17 | 17 | 17 |
+| `luna` | barato | 14 de 17 | 14 | 17 |
+| `deepseek` | barato | 17 de 17 | 17 | — |
+
+- Sin validador salieron completas 81 de las 85 implementaciones. Las cuatro incompletas son de `reservas-fijas` y fallan en el mismo criterio, el 8: la respuesta de `POST /api/series` trae las reservas completas en lugar de sus ids. Una de Luna falla además el 6, porque las reservas de la serie contaban para el límite de 3 reservas futuras.
+- El validador del mismo modelo (B) no arregló ninguna. El de Opus aceptó su trabajo con el fallo dentro. El de Luna marcó 1 de los 4 criterios que fallaban (el 6) y no vio nunca el 8.
+- El validador potente (C, gpt-6.1-sol sobre Luna) marcó los 4 en su primera validación, y las reparaciones de Luna dejaron completos los tres encargos.
+- La misma sesión (D) detectó lo mismo que B: 0 de 1 con Opus y 1 de 4 con Luna.
+- Ninguna reparación estropeó un criterio que estuviera bien.
+
+### ¿Compensa?
+
+Con la regla fijada antes de ver los datos, compensa en una sola combinación: el validador potente sobre Luna en los encargos difíciles, que arregla 3 y no estropea ninguno. En las demás, o no había nada que arreglar, o el validador no lo arregló.
+
+### Lo que cuesta
+
+| Config | Implementar, por encargo | B, coste extra | C, coste extra |
+|---|---|---|---|
+| `opus` | 0,76 $ | 10,33 $ (+80 %) | — |
+| `sol` | 0,14 $ | 3,06 $ (+130 %) | — |
+| `haiku` | 0,07 $ | 1,15 $ (+97 %) | 10,04 $ (+846 %) |
+| `luna` | 0,009 $ | 0,28 $ (+173 %) | 5,43 $ (+3.399 %) |
+| `deepseek` | 0,10 $ | 2,31 $ (+135 %) | — |
+
+El coste extra es lo que cuesta validar y reparar en los 17 encargos, y el porcentaje, sobre lo que costó implementarlos.
+
+- Luna con el validador potente costó 5,59 $ por los 17 encargos y los dejó todos completos. Sol solo costó 2,35 $, con los 17 completos a la primera. Y Haiku solo, 1,19 $, también con los 17 completos.
+- Validar en la misma sesión (D) sale más barato o más caro según el modelo. Con Opus cuesta 0,31 $ por validación, frente a 0,48 $ en una sesión limpia. Con Haiku y DeepSeek sale más caro (0,08 $ frente a 0,02 $, y 0,12 $ frente a 0,08 $). Con Sol y Luna cuesta casi lo mismo. La sesión reanudada arrastra todo el contexto de la implementación: a Opus se lo abarata la caché, y DeepSeek, que en nuestra tabla de precios no tiene descuento por caché, lo paga entero.
+
+### Peticiones de cambio en trabajo completo
+
+Los validadores pidieron cambios 102 veces sobre estados que los tests ocultos daban por completos, con 222 hallazgos. Los revisamos uno a uno, con cinco revisores (Claude Opus 5.5, uno por encargo o por pareja de encargos): cada hallazgo se comprobó con una prueba contra el estado validado y contra la base, o leyendo el código. Las instrucciones, las clasificaciones y las pruebas están en `analisis/revision/`.
+
+| Categoría | Hallazgos | Qué es |
+|---|---|---|
+| Defecto | 80 (36 %) | El validador tenía razón: el estado no cumple la spec en algo que los tests ocultos no miran |
+| De más | 111 (50 %) | La spec no lo pide: validaciones extra, casos que deja abiertos, más tests, retoques del README |
+| Previo | 23 (10 %) | Es real, pero la base ya era así y la spec no pide cambiarlo |
+| Error | 7 (3 %) | Lo que dice el validador es falso |
+| Ambigua | 1 | La spec admite las dos lecturas |
+
+- **Los 80 defectos son 50 fallos distintos,** porque varios validadores señalaron el mismo. 35 son de comportamiento, 12 son tests que faltan y 3 son del README.
+- **Casi todos son casos límite:** fechas u horas imposibles (el 30 de febrero, las 10:60, el mes 13), un código de descuento vacío o el año 9999. Pero hay alguno serio. Una implementación de Luna (`facturas-luna-r1`) se inventó una penalización en el historial de la semilla y la factura de octubre de un socio salía por 192 € en lugar de 180 €. Los tests ocultos no lo ven porque calculan lo esperado con el `/_estado` de la propia implementación.
+
+Cuántas peticiones de cambio sobre trabajo completo llevaban al menos un defecto real:
+
+| Implementa | Valida | Condición | Peticiones | Con algún defecto |
+|---|---|---|---|---|
+| `opus` | `opus` | B | 4 | 3 |
+| `opus` | `opus` | D | 1 | 0 |
+| `sol` | `sol` | B | 3 | 0 |
+| `sol` | `sol` | D | 6 | 1 |
+| `haiku` | `haiku` | B | 19 | 9 |
+| `haiku` | `haiku` | D | 10 | 6 |
+| `haiku` | `opus` | C | 5 | 5 |
+| `luna` | `luna` | B | 19 | 11 |
+| `luna` | `luna` | D | 7 | 5 |
+| `luna` | `sol` | C | 20 | 15 |
+| `deepseek` | `deepseek` | B | 6 | 5 |
+| `deepseek` | `deepseek` | D | 2 | 2 |
+
+**Reparaciones que estropearon algo que los tests no miran:**
+- **`reservas-fijas-opus-r1` (B):** la primera reparación cambió también las reservas normales, que es lo que la spec pide no tocar. La segunda lo deshizo.
+- **`lista-espera-haiku-r1` (B):** una falsa alarma llevó a una reparación que creaba reservas en pistas cerradas. La siguiente ronda lo vio y lo deshizo.
+- **`codigos-descuento-luna-r1` (B):** para que pasaran sus tests, la segunda reparación metió en la semilla un socio de prueba con tres reservas. Se queda en el estado final.
+- **`exportar-csv-deepseek-r2` (B):** la reparación pone un apóstrofo delante de las notas que empiezan por `=`, `+`, `-` o `@`, así que cambia los datos exportados. Se queda en el estado final.
+- **`lista-espera-luna-r2` (C):** la reparación de la pista cerrada abrió un fallo nuevo del criterio 3.
+- **El cambio de hora en `reservas-fijas`:** en 7 estados finales (B de deepseek-r3, luna-r1 y las tres de sol, y C de luna-r2 y luna-r3), cancelar la serie cuenta horas reales y cancelar la reserva sola sigue con horas de reloj, como la base. La misma reserva sale gratis o queda pendiente según cómo se cancele. En `luna-r2` (B), la reparación cambió además la regla de todo el club.
+- **Tres reparaciones editaron la propia spec,** las tres de Haiku en B. Las dos de `lista-espera` (un glosario en r1 y dos criterios reescritos en r2) siguen en el estado final. La de `exportar-csv-haiku-r1` se deshizo en la ronda siguiente.
+
+### Una vara más exigente (después de ver los datos)
+
+Esta parte no estaba en el diseño: la añadimos después de ver los datos, porque la revisión dejaba un sesgo. A Haiku y Luna las miraron tres validadores (D, B y C, y en C uno potente), y a Opus, Sol y DeepSeek solo dos y siempre del mismo modelo. Así, los defectos que aparecían dependían de quién había mirado.
+
+Para corregirlo, los revisores convirtieron cada clase de defecto de comportamiento en un test (`ocultos-ampliados/`, 22 tests en seis encargos) y los pasamos por todos los estados: la implementación, el final de B y el final de C de cada cadena, más la base y la referencia. Los tests ampliados encontraron fallos que ningún validador había visto, también en Opus y en Sol. Reembolsos no tiene ninguno, porque su único defecto de comportamiento no cambia ninguna respuesta de la API.
+
+Un estado está completo con esta vara si cumple los criterios ocultos y pasa los tests ampliados de su encargo. Damos dos versiones (`analisis/ampliados/gravedad.json`):
+- **Todos los defectos.**
+- **Solo los mayores:** datos equivocados que siempre están ahí (la semilla cambiada), una validación de la base que la feature rompe, un riesgo de seguridad, o un comportamiento equivocado en un caso que puede pasar (cancelar con la pista cerrada, notas que empiezan por un guion). Los menores son los que solo cambian el código de error de una petición que falla igual, los que necesitan una entrada imposible que la base ya aceptaba (el 30 de febrero) y los casos rebuscados (el año 9999, más de 10 000 esperas, cerrar y reabrir la pista entre medias).
+
+Encargos completos de 17, con la regla de "compensa" aplicada igual que antes (por dificultad):
+
+| Config | Mayores: A | B | C | ¿Compensa? | Todos: A | B | C | ¿Compensa? |
+|---|---|---|---|---|---|---|---|---|
+| `opus` | 15 | 15 | — | no | 10 | 12 | — | B, en difíciles |
+| `sol` | 17 | 17 | — | no | 15 | 15 | — | no |
+| `haiku` | 14 | 17 | 17 | B y C, en difíciles | 7 | 14 | 11 | B, en los dos, y C, en difíciles |
+| `luna` | 10 | 9 | 17 | C, en los dos | 6 | 7 | 16 | C, en los dos |
+| `deepseek` | 13 | 14 | — | B, en difíciles | 10 | 12 | — | B, en difíciles |
+
+- **Sol** no tiene ningún defecto mayor, y sus dos menores (la duración sale vacía en una reserva con una fecha imposible) no los arregla su validador.
+- **Opus** tiene dos mayores (el criterio 8 de `reservas-fijas` y una hora 99:00 que acepta en `duraciones`) y su validador no arregla ninguno. Con todos los defectos, arregla dos casos de fechas imposibles en las series.
+- **Haiku:** su propio validador arregla sus tres mayores (horas como las 10:60, que la base rechazaba), igual que Opus validándola, y cuesta casi nueve veces menos.
+- **Luna:** su propio validador no arregla ninguno de sus siete mayores y estropea uno (el socio de prueba en la semilla). Sol validándola los arregla todos.
+- **DeepSeek:** su validador arregla dos de sus cuatro mayores y estropea uno (el apóstrofo en las notas).
+
+Lo que cuesta llegar a esos resultados, en los 17 encargos y con los defectos mayores:
+
+| Con qué | Coste | Completos |
+|---|---|---|
+| Opus solo | 12,98 $ | 15 |
+| Haiku solo | 1,19 $ | 14 |
+| Haiku y su validador | 2,34 $ | 17 |
+| Haiku y Opus validando | 11,23 $ | 17 |
+| Sol solo | 2,35 $ | 17 |
+| Luna sola | 0,16 $ | 10 |
+| Luna y su validador | 0,44 $ | 9 |
+| Luna y Sol validando | 5,59 $ | 17 |
+| DeepSeek solo | 1,71 $ | 13 |
+| DeepSeek y su validador | 4,02 $ | 14 |
+
+Las matrices de cada encargo (estado por test) están en `analisis/ampliados/`.
+
+### Otras cosas que pasaron
+
+- **El gate.** En 1 de las 85 implementaciones, el agente (`codigos-descuento-luna-r1`) dio el trabajo por terminado con `npm run check` en rojo, porque fallaban sus propios tests. Los dos validadores lo vieron y las reparaciones lo arreglaron. Un gate en la integración continua lo habría parado igual.
+- **Un gate roto por la carga.** Tras la reparación de `reservas-fijas-sol-r1` (B), el gate falló al corregir. Corregido otra vez tres veces con la máquina en reposo, pasa siempre.
+- **Tests inestables.** En 5 estados, algún test oculto falló en la primera pasada y pasó en la segunda. Corregidos otra vez con la máquina en reposo, pasan siempre, así que era la carga y no la implementación.
+- **Un validador sin veredicto.** DeepSeek terminó una validación (`lista-espera-deepseek-r2`, B1) anunciando más comprobaciones y sin dar veredicto. Cuenta como validación sin veredicto, y no hubo reparación.
+- **Ficheros sueltos.** Opus, como validador, dejó dos veces en la carpeta las salidas de sus pruebas (`o1.json`, `o2.json` y `out.txt`). No tocó código, pero cuenta en la columna "El validador tocó código" de `analisis/completo.md`.
+
+### Correcciones del análisis
+
+- **El coste de D.** D reanuda la sesión que implementó, y al reanudar, Claude Code da el coste de toda la sesión y Codex los tokens de todo el hilo. El análisis contaba ese total como coste de validar. Ahora resta lo que ya había gastado la implementación (`solo_lo_reanudado` en `analisis/analizar.py`), también en los dos pilotos. OpenCode da los tokens de cada ejecución, así que en DeepSeek no cambia nada.
+
+### Lo que limita estos resultados
+
+- Los fallos que ven los tests ocultos están concentrados. Los cinco criterios que fallaron son de un solo encargo, y cuatro son el mismo punto.
+- La vara ampliada se escribió después de ver los datos y sale de lo que encontraron los validadores: un defecto que no vio ningún validador ni ningún revisor no está. La revisión y los tests ampliados los hizo Claude Opus 5.5, el mismo modelo que valida en `opus` y en la C de `haiku`. Para que eso pese lo menos posible, cada defecto se comprobó con una prueba contra el estado y contra la base. Dónde va la línea entre defectos mayores y menores es decisión nuestra, y por eso damos las dos versiones.
+- El criterio 8 se presta a confusión. La spec dice que una serie lleva los ids de sus reservas y que solo `GET /api/series/:id` las trae completas, pero el criterio dice que el POST responde "con la serie, sus `reservas` y sus `saltadas`". Quien lee la spec entera lo resuelve, y 11 de las 15 implementaciones lo hicieron bien.
 
 ## Límites
 
