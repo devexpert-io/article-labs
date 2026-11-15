@@ -1,0 +1,609 @@
+diff --git a/README.md b/README.md
+index 256e5c2..14389f3 100644
+--- a/README.md
++++ b/README.md
+@@ -22,9 +22,10 @@ En el club siempre es miércoles 18 de noviembre de 2026 a las 10:00, salvo que
+ ## Reglas del club
+ 
+ - Para reservar hay que tener la cuota al día (`cuotaActiva`).
+-- Cada socio puede tener como máximo 3 reservas futuras confirmadas.
++- Cada socio puede tener como máximo 3 reservas futuras confirmadas. Las reservas de una serie no cuentan para este límite.
+ - No se reservan pistas cerradas ni franjas que ya han empezado.
+ - Cancelar es gratis hasta 24 horas antes. Después, solo con `forzar: true`, y se cobra una penalización del 100 % del importe.
++- Las series fijas las crea la recepción (un socio con rol `gestor`), no los socios. Reservan la misma franja cada 7 días, con la misma hora local aunque cambie la hora. Las series de 8 semanas o más tienen un 10 % de descuento en cada reserva, redondeado al céntimo hacia abajo. Las semanas que ya están ocupadas se saltan. Cancelar una serie es gratis a partir de 24 horas antes de cada reserva; las que empiezan en menos de 24 horas siguen confirmadas salvo con `forzar: true`, que las cancela con la penalización del 100 %.
+ 
+ ## API
+ 
+@@ -48,7 +49,17 @@ En el club siempre es miércoles 18 de noviembre de 2026 a las 10:00, salvo que
+ - `POST /api/reservas` con `{ socioId, pistaId, inicio, notas? }`: crea una reserva. Responde `201 { reserva }`. Errores: `SOCIO_NO_ENCONTRADO`, `PISTA_NO_ENCONTRADA`, `FRANJA_INVALIDA`, `CUOTA_INACTIVA`, `PISTA_CERRADA`, `FRANJA_PASADA`, `FRANJA_NO_DISPONIBLE` y `LIMITE_DE_RESERVAS`.
+ - `POST /api/reservas/:id/cancelar` con `{ forzar?, motivo? }`: cancela una reserva. Responde `{ reserva }`. Errores: `RESERVA_NO_ENCONTRADA`, `YA_CANCELADA`, `RESERVA_PASADA` y `FUERA_DE_PLAZO`.
+ 
+-Una reserva tiene `id`, `socioId`, `pistaId`, `inicio`, `fin`, `estado`, `importe`, `notas` y, si se canceló, `penalizacion` y `motivoCancelacion`.
++Una reserva tiene `id`, `socioId`, `pistaId`, `inicio`, `fin`, `estado`, `importe`, `notas` y, si se canceló, `penalizacion` y `motivoCancelacion`. Si la reserva forma parte de una serie, lleva además `serieId`.
++
++### Series fijas
++
++Solo un gestor (cabecera `X-Socio` de un socio con rol `gestor`) puede crear, consultar y cancelar series. Sin `X-Socio` la API responde `401 NO_IDENTIFICADO`, y con un socio que no es gestor, `403 SIN_PERMISO`.
++
++- `POST /api/series` con `{ socioId, pistaId, inicio, semanas }`: crea la serie. `inicio` es la primera reserva y `semanas` cuántas semanas seguidas, contando la primera (de 2 a 12). Crea una reserva confirmada cada 7 días, en la misma pista y a la misma hora local. Responde `201 { serie }`. Errores: `SOCIO_NO_ENCONTRADO`, `PISTA_NO_ENCONTRADA`, `FRANJA_INVALIDA`, `FRANJA_PASADA`, `CUOTA_INACTIVA`, `PISTA_CERRADA` y, si no se puede reservar ninguna semana, `SERIE_VACIA` (sin crear nada).
++- `GET /api/series/:id`: la serie. Responde `{ serie }`, con sus `reservas` completas por orden de fecha. Errores: `SERIE_NO_ENCONTRADA`.
++- `POST /api/series/:id/cancelar` con `{ forzar? }`: cancela la serie. Cancela sin penalización las reservas confirmadas a las que les faltan 24 horas o más y devuelve sus ids en `canceladas`; las que empiezan en menos de 24 horas siguen confirmadas y se devuelven en `pendientes`, salvo con `forzar: true`, que las cancela con la penalización del 100 %. Las reservas que ya han empezado, las canceladas y las no presentadas no se tocan. Responde `{ serie, canceladas, pendientes }`.
++
++Una serie tiene `id`, `socioId`, `pistaId`, `inicio`, `semanas`, `reservas` (los ids de las reservas creadas, por orden de fecha) y `saltadas` (las semanas ocupadas, cada una con `inicio` y `codigo`, `FRANJA_NO_DISPONIBLE`). Cada reserva de una serie lleva `serieId` y se puede cancelar suelta con `POST /api/reservas/:id/cancelar`, con las reglas de siempre; la serie sigue con las demás. En `GET /api/series/:id`, `reservas` trae las reservas completas en lugar de los ids.
+ 
+ ### Solo para pruebas
+ 
+diff --git a/src/nucleo.ts b/src/nucleo.ts
+index 62ed37b..cc3c126 100644
+--- a/src/nucleo.ts
++++ b/src/nucleo.ts
+@@ -1,6 +1,6 @@
+ // Las operaciones del club y sus reglas. La API HTTP (src/servidor.ts) es la única que las llama.
+ import { finDeFranja, HORAS, precio } from "./semilla.ts";
+-import type { Estado, EstadoReserva, Reserva } from "./tipos.ts";
++import type { Estado, EstadoReserva, Reserva, Serie } from "./tipos.ts";
+ 
+ export class ErrorDelClub extends Error {
+   codigo: string;
+@@ -18,11 +18,27 @@ export const LIMITE_MAXIMO = 100;
+ export const LIMITE_POR_DEFECTO = 50;
+ export const MAXIMO_RESERVAS_FUTURAS = 3;
+ export const HORAS_CANCELACION_GRATUITA = 24;
++export const MINIMO_SEMANAS_SERIE = 2;
++export const MAXIMO_SEMANAS_SERIE = 12;
++/** A partir de estas semanas, cada reserva de la serie cuesta un 10 % menos. */
++export const SEMANAS_CON_DESCUENTO = 8;
+ 
+ function invalido(mensaje: string): never {
+   throw new ErrorDelClub("DATOS_INVALIDOS", mensaje, 400);
+ }
+ 
++/** Suma días al calendario y conserva la hora local de la franja. */
++function sumarDias(inicio: string, dias: number): string {
++  const fecha = new Date(`${inicio.slice(0, 10)}T12:00:00Z`);
++  fecha.setUTCDate(fecha.getUTCDate() + dias);
++  return `${fecha.toISOString().slice(0, 10)}${inicio.slice(10)}`;
++}
++
++/** El precio de una reserva de serie: un 10 % menos si la serie es larga, al céntimo. */
++function precioDeSerie(precioNormal: number, semanas: number): number {
++  return semanas >= SEMANAS_CON_DESCUENTO ? Math.floor((precioNormal * 9) / 10) : precioNormal;
++}
++
+ function sinAcentos(texto: string): string {
+   return texto.toLowerCase().normalize("NFD").replace(/[̀-ͯ]/g, "");
+ }
+@@ -53,6 +69,11 @@ export function crearClub(estado: Estado) {
+     if (!encontrada) throw new ErrorDelClub("RESERVA_NO_ENCONTRADA", `No existe la reserva ${id}`, 404);
+     return encontrada;
+   };
++  const serie = (id: string) => {
++    const encontrada = estado.series.find((s) => s.id === id);
++    if (!encontrada) throw new ErrorDelClub("SERIE_NO_ENCONTRADA", `No existe la serie ${id}`, 404);
++    return encontrada;
++  };
+   const ocupada = (pistaId: string, inicio: string) =>
+     estado.reservas.some((r) => r.pistaId === pistaId && r.inicio === inicio && r.estado === "confirmada");
+ 
+@@ -141,7 +162,7 @@ export function crearClub(estado: Estado) {
+       if (p.estado === "cerrada") throw new ErrorDelClub("PISTA_CERRADA", `${p.nombre} está cerrada`);
+       if ((inicio as string) <= estado.ahora) throw new ErrorDelClub("FRANJA_PASADA", "Esa franja ya ha empezado o ha pasado");
+       if (ocupada(p.id, inicio as string)) throw new ErrorDelClub("FRANJA_NO_DISPONIBLE", "Esa franja ya está reservada");
+-      const futuras = estado.reservas.filter((r) => r.socioId === socio.id && r.estado === "confirmada" && r.inicio > estado.ahora);
++      const futuras = estado.reservas.filter((r) => r.socioId === socio.id && r.estado === "confirmada" && r.inicio > estado.ahora && !r.serieId);
+       if (futuras.length >= MAXIMO_RESERVAS_FUTURAS) {
+         throw new ErrorDelClub("LIMITE_DE_RESERVAS", `${socio.nombre} ya tiene ${MAXIMO_RESERVAS_FUTURAS} reservas futuras`);
+       }
+@@ -180,6 +201,103 @@ export function crearClub(estado: Estado) {
+       if (typeof datos.motivo === "string") r.motivoCancelacion = datos.motivo;
+       return { reserva: r };
+     },
++
++    crearSerie(datos: { socioId?: unknown; pistaId?: unknown; inicio?: unknown; semanas?: unknown }) {
++      const { socioId, pistaId, inicio, semanas } = datos;
++      if (typeof socioId !== "string" || typeof pistaId !== "string" || typeof inicio !== "string") {
++        invalido("socioId, pistaId e inicio son obligatorios");
++      }
++      if (
++        !Number.isInteger(semanas) ||
++        (semanas as number) < MINIMO_SEMANAS_SERIE ||
++        (semanas as number) > MAXIMO_SEMANAS_SERIE
++      ) {
++        invalido(`semanas debe ser un entero entre ${MINIMO_SEMANAS_SERIE} y ${MAXIMO_SEMANAS_SERIE}`);
++      }
++      const socio = estado.socios.find((s) => s.id === socioId);
++      if (!socio) throw new ErrorDelClub("SOCIO_NO_ENCONTRADO", `No existe el socio ${socioId}`, 404);
++      const p = pista(pistaId as string);
++      if (!FECHA_HORA.test(inicio as string) || !HORAS.includes((inicio as string).slice(11))) {
++        throw new ErrorDelClub("FRANJA_INVALIDA", `inicio debe ser AAAA-MM-DDTHH:MM y empezar a una de estas horas: ${HORAS.join(", ")}`, 400);
++      }
++      if ((inicio as string) <= estado.ahora) throw new ErrorDelClub("FRANJA_PASADA", "Esa franja ya ha empezado o ha pasado");
++      if (!socio.cuotaActiva) throw new ErrorDelClub("CUOTA_INACTIVA", `${socio.nombre} no tiene la cuota al día`);
++      if (p.estado === "cerrada") throw new ErrorDelClub("PISTA_CERRADA", `${p.nombre} está cerrada`);
++
++      // Primero se calcula la serie entera y solo después se crea: o entran todas las semanas que se pueden, o nada.
++      const creables: { inicio: string; importe: number }[] = [];
++      const saltadas: { inicio: string; codigo: string }[] = [];
++      for (let semana = 0; semana < (semanas as number); semana++) {
++        const inicioSemana = sumarDias(inicio as string, semana * 7);
++        if (ocupada(p.id, inicioSemana)) {
++          saltadas.push({ inicio: inicioSemana, codigo: "FRANJA_NO_DISPONIBLE" });
++        } else {
++          creables.push({ inicio: inicioSemana, importe: precioDeSerie(precio(p, inicioSemana), semanas as number) });
++        }
++      }
++      if (creables.length === 0) {
++        throw new ErrorDelClub("SERIE_VACIA", "Ninguna semana de la serie está disponible");
++      }
++
++      estado.contadorSeries += 1;
++      const nueva: Serie = {
++        id: `S-${String(estado.contadorSeries).padStart(4, "0")}`,
++        socioId: socio.id,
++        pistaId: p.id,
++        inicio: inicio as string,
++        semanas: semanas as number,
++        reservas: [],
++        saltadas,
++      };
++      for (const semana of creables) {
++        estado.contador += 1;
++        const creada: Reserva = {
++          id: `R-${String(estado.contador).padStart(4, "0")}`,
++          socioId: socio.id,
++          pistaId: p.id,
++          inicio: semana.inicio,
++          fin: finDeFranja(semana.inicio),
++          estado: "confirmada",
++          importe: semana.importe,
++          notas: "",
++          serieId: nueva.id,
++        };
++        estado.reservas.push(creada);
++        nueva.reservas.push(creada.id);
++      }
++      estado.series.push(nueva);
++      return { serie: nueva };
++    },
++
++    obtenerSerie(id: string) {
++      const s = serie(id);
++      // En la consulta, las reservas van completas y por orden de fecha.
++      const reservas = s.reservas.map((rid) => reserva(rid)).sort((a, b) => a.inicio.localeCompare(b.inicio));
++      return { serie: { ...s, reservas } };
++    },
++
++    cancelarSerie(id: string, datos: { forzar?: unknown }) {
++      const s = serie(id);
++      if (datos.forzar !== undefined && typeof datos.forzar !== "boolean") invalido("forzar debe ser true o false");
++      const canceladas: string[] = [];
++      const pendientes: string[] = [];
++      for (const rid of s.reservas) {
++        const r = reserva(rid);
++        // Las que ya han empezado, las canceladas y las no presentadas no se tocan.
++        if (r.estado !== "confirmada" || r.inicio <= estado.ahora) continue;
++        if (horasEntre(estado.ahora, r.inicio) >= HORAS_CANCELACION_GRATUITA) {
++          r.estado = "cancelada";
++          canceladas.push(r.id);
++        } else if (datos.forzar === true) {
++          r.penalizacion = r.importe;
++          r.estado = "cancelada";
++          canceladas.push(r.id);
++        } else {
++          pendientes.push(r.id);
++        }
++      }
++      return { serie: s, canceladas, pendientes };
++    },
+   };
+ }
+ 
+diff --git a/src/semilla.ts b/src/semilla.ts
+index bc45cc7..539df18 100644
+--- a/src/semilla.ts
++++ b/src/semilla.ts
+@@ -158,5 +158,5 @@ export function crearSemilla(): Estado {
+   socios.push({ id: "socio-041", nombre: "Nora Benítez", email: "nora.benitez@example.com", cuotaActiva: true, rol: "socio" });
+ 
+   reservas.sort((a, b) => (a.inicio === b.inicio ? a.pistaId.localeCompare(b.pistaId) : a.inicio.localeCompare(b.inicio)));
+-  return { ahora: AHORA, pistas: PISTAS.map((p) => ({ ...p })), socios, reservas, registro: [], contador };
++  return { ahora: AHORA, pistas: PISTAS.map((p) => ({ ...p })), socios, reservas, series: [], registro: [], contador, contadorSeries: 0 };
+ }
+diff --git a/src/servidor.ts b/src/servidor.ts
+index a6a7764..0fb6d3c 100644
+--- a/src/servidor.ts
++++ b/src/servidor.ts
+@@ -42,10 +42,16 @@ function identificar(req: IncomingMessage): Socio | undefined {
+   return socio;
+ }
+ 
++/** Las series fijas solo las gestiona la recepción: un socio con rol de gestor. */
++function exigirGestor(quien: Socio | undefined): void {
++  if (!quien) throw new ErrorDelClub("NO_IDENTIFICADO", "Hace falta la cabecera X-Socio de un gestor", 401);
++  if (quien.rol !== "gestor") throw new ErrorDelClub("SIN_PERMISO", "Solo un gestor puede gestionar las series", 403);
++}
++
+ type Operacion = { nombre: string; argumentos: unknown; ejecutar: () => unknown };
+ 
+-// `quien` es el socio que hace la petición (cabecera X-Socio). Las operaciones actuales no lo usan.
+-async function resolver(req: IncomingMessage, url: URL, _quien: Socio | undefined): Promise<Operacion> {
++// `quien` es el socio que hace la petición (cabecera X-Socio).
++async function resolver(req: IncomingMessage, url: URL, quien: Socio | undefined): Promise<Operacion> {
+   const metodo = req.method ?? "GET";
+   const partes = url.pathname.split("/").filter(Boolean);
+   const q = url.searchParams;
+@@ -91,6 +97,20 @@ async function resolver(req: IncomingMessage, url: URL, _quien: Socio | undefine
+     const cuerpo = await leerCuerpo(req);
+     return { nombre: "cancelarReserva", argumentos: { reservaId: id, ...cuerpo }, ejecutar: () => club.cancelarReserva(id, cuerpo) };
+   }
++  if (recurso === "series" && !id && metodo === "POST") {
++    exigirGestor(quien);
++    const cuerpo = await leerCuerpo(req);
++    return { nombre: "crearSerie", argumentos: cuerpo, ejecutar: () => club.crearSerie(cuerpo) };
++  }
++  if (recurso === "series" && id && !accion && metodo === "GET") {
++    exigirGestor(quien);
++    return { nombre: "obtenerSerie", argumentos: { serieId: id }, ejecutar: () => club.obtenerSerie(id) };
++  }
++  if (recurso === "series" && id && accion === "cancelar" && metodo === "POST") {
++    exigirGestor(quien);
++    const cuerpo = await leerCuerpo(req);
++    return { nombre: "cancelarSerie", argumentos: { serieId: id, ...cuerpo }, ejecutar: () => club.cancelarSerie(id, cuerpo) };
++  }
+   throw new ErrorDelClub("RUTA_NO_ENCONTRADA", `No existe ${metodo} ${url.pathname}`, 404);
+ }
+ 
+@@ -131,7 +151,7 @@ const servidor = createServer(async (req, res) => {
+     operacion = await resolver(req, url, quien);
+     const resultado = operacion.ejecutar();
+     anotar(true);
+-    responder(operacion.nombre === "crearReserva" ? 201 : 200, resultado);
++    responder(operacion.nombre === "crearReserva" || operacion.nombre === "crearSerie" ? 201 : 200, resultado);
+   } catch (error) {
+     if (error instanceof ErrorDelClub) {
+       anotar(false, error.codigo);
+diff --git a/src/tipos.ts b/src/tipos.ts
+index 41e5915..54ba648 100644
+--- a/src/tipos.ts
++++ b/src/tipos.ts
+@@ -32,6 +32,26 @@ export interface Reserva {
+   /** Céntimos cobrados al cancelar fuera de plazo. */
+   penalizacion?: number;
+   motivoCancelacion?: string;
++  /** Serie semanal a la que pertenece la reserva, si la hay. */
++  serieId?: string;
++}
++
++/** Semana de una serie que no se pudo reservar. */
++export interface SemanaSaltada {
++  inicio: string;
++  codigo: string;
++}
++
++export interface Serie {
++  id: string;
++  socioId: string;
++  pistaId: string;
++  inicio: string;
++  semanas: number;
++  /** Ids de las reservas creadas, por orden de fecha. */
++  reservas: string[];
++  /** Semanas que no se pudieron reservar, por orden de fecha. */
++  saltadas: SemanaSaltada[];
+ }
+ 
+ export interface EntradaRegistro {
+@@ -47,6 +67,8 @@ export interface Estado {
+   pistas: Pista[];
+   socios: Socio[];
+   reservas: Reserva[];
++  series: Serie[];
+   registro: EntradaRegistro[];
+   contador: number;
++  contadorSeries: number;
+ }
+diff --git a/test/series.test.ts b/test/series.test.ts
+new file mode 100644
+index 0000000..92b2dad
+--- /dev/null
++++ b/test/series.test.ts
+@@ -0,0 +1,299 @@
++// Las reservas fijas semanales: series que crea la recepción y cancela entera.
++import assert from "node:assert/strict";
++import { after, before, test } from "node:test";
++import { arrancarApi, type Api } from "./ayuda.ts";
++
++let api: Api;
++const GESTOR = "socio-040";
++const SOCIO = "socio-003";
++
++before(async () => {
++  api = await arrancarApi();
++});
++after(() => api.cerrar());
++
++function crearSerie(datos: unknown, socio = GESTOR) {
++  return api.pedir("POST", "/api/series", { cuerpo: datos, socio });
++}
++
++function fijarReloj(ahora: string) {
++  return api.pedir("POST", "/_reloj", { cuerpo: { ahora } });
++}
++
++test("permisos: sin X-Socio, 401; con un socio normal, 403", async () => {
++  const cuerpo = { socioId: "socio-041", pistaId: "pista-1", inicio: "2027-05-18T12:00", semanas: 2 };
++  const sinIdentificar = await api.pedir("POST", "/api/series", { cuerpo });
++  assert.equal(sinIdentificar.status, 401);
++  assert.equal(sinIdentificar.cuerpo.error.codigo, "NO_IDENTIFICADO");
++
++  const socioNormal = await crearSerie(cuerpo, SOCIO);
++  assert.equal(socioNormal.status, 403);
++  assert.equal(socioNormal.cuerpo.error.codigo, "SIN_PERMISO");
++
++  const consultaSin = await api.pedir("GET", "/api/series/S-0001");
++  assert.equal(consultaSin.status, 401);
++  assert.equal(consultaSin.cuerpo.error.codigo, "NO_IDENTIFICADO");
++
++  const consultaSocio = await api.pedir("GET", "/api/series/S-0001", { socio: SOCIO });
++  assert.equal(consultaSocio.status, 403);
++  assert.equal(consultaSocio.cuerpo.error.codigo, "SIN_PERMISO");
++
++  const cancelarSin = await api.pedir("POST", "/api/series/S-0001/cancelar");
++  assert.equal(cancelarSin.status, 401);
++  assert.equal(cancelarSin.cuerpo.error.codigo, "NO_IDENTIFICADO");
++
++  const cancelarSocio = await api.pedir("POST", "/api/series/S-0001/cancelar", { socio: SOCIO });
++  assert.equal(cancelarSocio.status, 403);
++  assert.equal(cancelarSocio.cuerpo.error.codigo, "SIN_PERMISO");
++});
++
++test("datos: semanas entre 2 y 12, socio y pista existentes y franja válida y futura", async () => {
++  const base = { socioId: "socio-041", pistaId: "pista-3", inicio: "2027-04-06T12:00", semanas: 2 };
++  for (const semanas of [1, 13, 2.5, "3", null, undefined]) {
++    const r = await crearSerie({ ...base, semanas });
++    assert.equal(r.status, 400, `semanas=${String(semanas)} debe ser 400`);
++    assert.equal(r.cuerpo.error.codigo, "DATOS_INVALIDOS");
++  }
++  const sinSemanas = await crearSerie({ socioId: "socio-041", pistaId: "pista-3", inicio: "2027-04-06T12:00" });
++  assert.equal(sinSemanas.cuerpo.error.codigo, "DATOS_INVALIDOS");
++
++  const sinSocio = await crearSerie({ ...base, socioId: "socio-999" });
++  assert.equal(sinSocio.status, 404);
++  assert.equal(sinSocio.cuerpo.error.codigo, "SOCIO_NO_ENCONTRADO");
++
++  const sinPista = await crearSerie({ ...base, pistaId: "pista-9" });
++  assert.equal(sinPista.status, 404);
++  assert.equal(sinPista.cuerpo.error.codigo, "PISTA_NO_ENCONTRADA");
++
++  for (const inicio of ["2027-04-06T12:45", "2027-04-06", "2027-04-06T25:00"]) {
++    const r = await crearSerie({ ...base, inicio });
++    assert.equal(r.status, 400, `inicio=${inicio} debe ser 400`);
++    assert.equal(r.cuerpo.error.codigo, "FRANJA_INVALIDA");
++  }
++
++  const pasada = await crearSerie({ ...base, inicio: "2026-11-18T09:00" });
++  assert.equal(pasada.status, 409);
++  assert.equal(pasada.cuerpo.error.codigo, "FRANJA_PASADA");
++});
++
++test("una reserva por semana, a la misma hora local aunque cambie la hora", async () => {
++  // Del martes 23 de marzo de 2027 al 6 de abril: el 28 de marzo cambia la hora en Europa/Madrid.
++  const primavera = await crearSerie({ socioId: "socio-041", pistaId: "pista-1", inicio: "2027-03-23T19:30", semanas: 3 });
++  assert.equal(primavera.status, 201);
++  const id = primavera.cuerpo.serie.id;
++  assert.match(id, /^S-/);
++  assert.equal(primavera.cuerpo.serie.socioId, "socio-041");
++  assert.equal(primavera.cuerpo.serie.pistaId, "pista-1");
++  assert.equal(primavera.cuerpo.serie.inicio, "2027-03-23T19:30");
++  assert.equal(primavera.cuerpo.serie.semanas, 3);
++  assert.deepEqual(primavera.cuerpo.serie.saltadas, []);
++  assert.equal(primavera.cuerpo.serie.reservas.length, 3);
++  for (const reservaId of primavera.cuerpo.serie.reservas) assert.equal(typeof reservaId, "string");
++
++  const serie = (await api.pedir("GET", `/api/series/${id}`, { socio: GESTOR })).cuerpo.serie;
++  assert.deepEqual(serie.reservas.map((r: any) => r.inicio), [
++    "2027-03-23T19:30",
++    "2027-03-30T19:30",
++    "2027-04-06T19:30",
++  ]);
++  assert.deepEqual(serie.reservas.map((r: any) => r.fin), [
++    "2027-03-23T21:00",
++    "2027-03-30T21:00",
++    "2027-04-06T21:00",
++  ]);
++  for (const reserva of serie.reservas) {
++    assert.equal(reserva.pistaId, "pista-1");
++    assert.equal(reserva.estado, "confirmada");
++    assert.equal(reserva.serieId, id);
++    assert.equal(reserva.importe, 2800, "3 semanas no tienen descuento");
++  }
++
++  // Y del martes 19 de octubre al 2 de noviembre de 2027, con el cambio de hora del 31 de octubre.
++  const otono = await crearSerie({ socioId: "socio-041", pistaId: "pista-3", inicio: "2027-10-19T18:00", semanas: 3 });
++  assert.equal(otono.status, 201);
++  const serieOtono = (await api.pedir("GET", `/api/series/${otono.cuerpo.serie.id}`, { socio: GESTOR })).cuerpo.serie;
++  assert.deepEqual(serieOtono.reservas.map((r: any) => r.inicio), [
++    "2027-10-19T18:00",
++    "2027-10-26T18:00",
++    "2027-11-02T18:00",
++  ]);
++});
++
++test("semanas ocupadas se saltan; si no cabe ninguna, 409 SERIE_VACIA sin crear nada", async () => {
++  // Ocupa la segunda semana de la serie con una reserva normal.
++  const ocupada = await api.pedir("POST", "/api/reservas", {
++    cuerpo: { socioId: "socio-041", pistaId: "pista-2", inicio: "2027-04-14T12:00" },
++  });
++  assert.equal(ocupada.status, 201);
++
++  const creada = await crearSerie({ socioId: "socio-041", pistaId: "pista-2", inicio: "2027-04-07T12:00", semanas: 3 });
++  assert.equal(creada.status, 201);
++  assert.equal(creada.cuerpo.serie.reservas.length, 2);
++  assert.deepEqual(creada.cuerpo.serie.saltadas, [
++    { inicio: "2027-04-14T12:00", codigo: "FRANJA_NO_DISPONIBLE" },
++  ]);
++  const serie = (await api.pedir("GET", `/api/series/${creada.cuerpo.serie.id}`, { socio: GESTOR })).cuerpo.serie;
++  assert.deepEqual(serie.reservas.map((r: any) => r.inicio), ["2027-04-07T12:00", "2027-04-21T12:00"]);
++
++  // Con todas las semanas ocupadas no se crea nada.
++  for (const inicio of ["2027-05-04T12:00", "2027-05-11T12:00"]) {
++    const r = await api.pedir("POST", "/api/reservas", { cuerpo: { socioId: "socio-041", pistaId: "pista-1", inicio } });
++    assert.equal(r.status, 201);
++  }
++  const antes = (await api.pedir("GET", "/_estado")).cuerpo;
++  const vacia = await crearSerie({ socioId: "socio-041", pistaId: "pista-1", inicio: "2027-05-04T12:00", semanas: 2 });
++  assert.equal(vacia.status, 409);
++  assert.equal(vacia.cuerpo.error.codigo, "SERIE_VACIA");
++  const despues = (await api.pedir("GET", "/_estado")).cuerpo;
++  assert.equal(despues.series.length, antes.series.length);
++  assert.equal(despues.reservas.length, antes.reservas.length);
++  assert.equal(despues.contador, antes.contador);
++  assert.equal(despues.contadorSeries, antes.contadorSeries);
++});
++
++test("comprobaciones de toda la serie: cuota y pista cerrada", async () => {
++  const sinCuota = await crearSerie({ socioId: "socio-011", pistaId: "pista-2", inicio: "2027-05-20T12:00", semanas: 2 });
++  assert.equal(sinCuota.status, 409);
++  assert.equal(sinCuota.cuerpo.error.codigo, "CUOTA_INACTIVA");
++
++  const cerrada = await crearSerie({ socioId: "socio-041", pistaId: "pista-4", inicio: "2027-05-20T12:00", semanas: 2 });
++  assert.equal(cerrada.status, 409);
++  assert.equal(cerrada.cuerpo.error.codigo, "PISTA_CERRADA");
++
++  const estado = (await api.pedir("GET", "/_estado")).cuerpo;
++  assert.equal(estado.reservas.filter((r: any) => r.inicio === "2027-05-20T12:00").length, 0);
++});
++
++test("las series no cuentan para el límite de 3 reservas futuras", async () => {
++  const normal = (inicio: string, pistaId = "pista-3") =>
++    api.pedir("POST", "/api/reservas", { cuerpo: { socioId: "socio-005", pistaId, inicio } });
++
++  // Luis Martín ya tenía dos reservas futuras: con esta llega a tres.
++  const terceraNormal = await normal("2026-11-24T12:00");
++  assert.equal(terceraNormal.status, 201);
++  const serie = await crearSerie({ socioId: "socio-005", pistaId: "pista-3", inicio: "2026-12-01T12:00", semanas: 2 });
++  assert.equal(serie.status, 201, "la serie se crea aunque el socio ya tenga tres reservas futuras");
++
++  const cuarta = await normal("2026-12-09T12:00");
++  assert.equal(cuarta.status, 409);
++  assert.equal(cuarta.cuerpo.error.codigo, "LIMITE_DE_RESERVAS");
++
++  // Al cancelar una reserva normal el socio vuelve a tener sitio, aunque siga con la serie.
++  const cancelada = await api.pedir("POST", `/api/reservas/${terceraNormal.cuerpo.reserva.id}/cancelar`);
++  assert.equal(cancelada.status, 200);
++  assert.equal(cancelada.cuerpo.reserva.estado, "cancelada");
++
++  const otraSerie = await crearSerie({ socioId: "socio-005", pistaId: "pista-2", inicio: "2026-12-02T12:00", semanas: 3 });
++  assert.equal(otraSerie.status, 201);
++  const suelta = await normal("2026-12-10T12:00", "pista-1");
++  assert.equal(suelta.status, 201, "las reservas de una serie no impiden reservar con las reglas de siempre");
++});
++
++test("descuento del 10 % en series de 8 semanas o más, al céntimo hacia abajo", async () => {
++  const larga = await crearSerie({ socioId: "socio-041", pistaId: "pista-1", inicio: "2027-06-01T19:30", semanas: 8 });
++  assert.equal(larga.status, 201);
++  const serieLarga = (await api.pedir("GET", `/api/series/${larga.cuerpo.serie.id}`, { socio: GESTOR })).cuerpo.serie;
++  assert.equal(serieLarga.reservas.length, 8);
++  for (const reserva of serieLarga.reservas) assert.equal(reserva.importe, 2520, "2800 - 10 %");
++  assert.equal((await api.pedir("GET", `/api/reservas/${serieLarga.reservas[0].id}`)).cuerpo.reserva.importe, 2520);
++
++  const corta = await crearSerie({ socioId: "socio-041", pistaId: "pista-2", inicio: "2027-08-03T19:30", semanas: 7 });
++  const serieCorta = (await api.pedir("GET", `/api/series/${corta.cuerpo.serie.id}`, { socio: GESTOR })).cuerpo.serie;
++  for (const reserva of serieCorta.reservas) assert.equal(reserva.importe, 2800);
++
++  const valle = await crearSerie({ socioId: "socio-041", pistaId: "pista-2", inicio: "2027-06-08T12:00", semanas: 8 });
++  const serieValle = (await api.pedir("GET", `/api/series/${valle.cuerpo.serie.id}`, { socio: GESTOR })).cuerpo.serie;
++  for (const reserva of serieValle.reservas) assert.equal(reserva.importe, 1620, "1800 - 10 %");
++});
++
++test("consultar una serie: reservas completas por fecha y 404 si no existe", async () => {
++  const creada = await crearSerie({ socioId: "socio-041", pistaId: "pista-3", inicio: "2027-07-06T15:00", semanas: 2 });
++  const consulta = await api.pedir("GET", `/api/series/${creada.cuerpo.serie.id}`, { socio: GESTOR });
++  assert.equal(consulta.status, 200);
++  const serie = consulta.cuerpo.serie;
++  assert.equal(serie.id, creada.cuerpo.serie.id);
++  assert.equal(serie.socioId, "socio-041");
++  assert.equal(serie.pistaId, "pista-3");
++  assert.equal(serie.inicio, "2027-07-06T15:00");
++  assert.equal(serie.semanas, 2);
++  assert.deepEqual(serie.reservas.map((r: any) => r.inicio), ["2027-07-06T15:00", "2027-07-13T15:00"]);
++  assert.equal(serie.reservas[0].socioId, "socio-041");
++  assert.equal(serie.reservas[0].notas, "");
++  assert.equal(serie.reservas[0].serieId, serie.id);
++
++  const inexistente = await api.pedir("GET", "/api/series/S-9999", { socio: GESTOR });
++  assert.equal(inexistente.status, 404);
++  assert.equal(inexistente.cuerpo.error.codigo, "SERIE_NO_ENCONTRADA");
++});
++
++test("cancelar la serie: gratis a partir de 24 horas, pendientes las de menos plazo y forzar con penalización", async () => {
++  try {
++    assert.equal((await fijarReloj("2026-11-25T10:00")).status, 200);
++
++    // Empieza mañana a las 09:00: faltan 23 horas.
++    const creada = await crearSerie({ socioId: "socio-041", pistaId: "pista-2", inicio: "2026-11-26T09:00", semanas: 3 });
++    assert.equal(creada.status, 201);
++    const [primera, segunda, tercera] = creada.cuerpo.serie.reservas;
++    const cancelacion = await api.pedir("POST", `/api/series/${creada.cuerpo.serie.id}/cancelar`, { socio: GESTOR });
++    assert.equal(cancelacion.status, 200);
++    assert.equal(cancelacion.cuerpo.serie.id, creada.cuerpo.serie.id);
++    assert.deepEqual(cancelacion.cuerpo.canceladas, [segunda, tercera]);
++    assert.deepEqual(cancelacion.cuerpo.pendientes, [primera]);
++
++    const pendiente = await api.pedir("GET", `/api/reservas/${primera}`);
++    assert.equal(pendiente.cuerpo.reserva.estado, "confirmada");
++    for (const id of [segunda, tercera]) {
++      const reserva = (await api.pedir("GET", `/api/reservas/${id}`)).cuerpo.reserva;
++      assert.equal(reserva.estado, "cancelada");
++      assert.equal(reserva.penalizacion, undefined, "la cancelación de la serie no tiene penalización");
++    }
++
++    // Con forzar también se cancela la que está a menos de 24 horas, con el 100 % de penalización.
++    const forzada = await crearSerie({ socioId: "socio-041", pistaId: "pista-1", inicio: "2026-11-26T09:00", semanas: 2 });
++    const [cara, siguiente] = forzada.cuerpo.serie.reservas;
++    const conPenalizacion = await api.pedir("POST", `/api/series/${forzada.cuerpo.serie.id}/cancelar`, {
++      socio: GESTOR,
++      cuerpo: { forzar: true },
++    });
++    assert.equal(conPenalizacion.status, 200);
++    assert.deepEqual(conPenalizacion.cuerpo.canceladas, [cara, siguiente]);
++    assert.deepEqual(conPenalizacion.cuerpo.pendientes, []);
++    const penalizada = (await api.pedir("GET", `/api/reservas/${cara}`)).cuerpo.reserva;
++    assert.equal(penalizada.estado, "cancelada");
++    assert.equal(penalizada.penalizacion, 1800);
++    const gratis = (await api.pedir("GET", `/api/reservas/${siguiente}`)).cuerpo.reserva;
++    assert.equal(gratis.estado, "cancelada");
++    assert.equal(gratis.penalizacion, undefined);
++
++    // Las que ya han empezado no se tocan: no salen ni en canceladas ni en pendientes.
++    const empezada = await crearSerie({ socioId: "socio-041", pistaId: "pista-3", inicio: "2026-12-01T09:00", semanas: 2 });
++    assert.equal(empezada.status, 201);
++    const [yaEmpezada, futura] = empezada.cuerpo.serie.reservas;
++    assert.equal((await fijarReloj("2026-12-02T10:00")).status, 200);
++    const tarde = await api.pedir("POST", `/api/series/${empezada.cuerpo.serie.id}/cancelar`, { socio: GESTOR });
++    assert.equal(tarde.status, 200);
++    assert.deepEqual(tarde.cuerpo.canceladas, [futura]);
++    assert.deepEqual(tarde.cuerpo.pendientes, []);
++    assert.equal((await api.pedir("GET", `/api/reservas/${yaEmpezada}`)).cuerpo.reserva.estado, "confirmada");
++  } finally {
++    await fijarReloj("2026-11-18T10:00");
++  }
++});
++
++test("una reserva de la serie se puede cancelar sola; la serie sigue con las demás", async () => {
++  const creada = await crearSerie({ socioId: "socio-041", pistaId: "pista-3", inicio: "2026-12-15T12:00", semanas: 3 });
++  const [primera, segunda, tercera] = creada.cuerpo.serie.reservas;
++
++  const suelta = await api.pedir("POST", `/api/reservas/${segunda}/cancelar`);
++  assert.equal(suelta.status, 200);
++  assert.equal(suelta.cuerpo.reserva.estado, "cancelada");
++
++  const serie = (await api.pedir("GET", `/api/series/${creada.cuerpo.serie.id}`, { socio: GESTOR })).cuerpo.serie;
++  assert.equal(serie.reservas.length, 3);
++  assert.deepEqual(serie.reservas.map((r: any) => r.estado), ["confirmada", "cancelada", "confirmada"]);
++
++  const cancelacion = await api.pedir("POST", `/api/series/${creada.cuerpo.serie.id}/cancelar`, { socio: GESTOR });
++  assert.equal(cancelacion.status, 200);
++  assert.deepEqual(cancelacion.cuerpo.canceladas, [primera, tercera]);
++  assert.deepEqual(cancelacion.cuerpo.pendientes, []);
++});

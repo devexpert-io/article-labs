@@ -1,0 +1,239 @@
+diff --git a/README.md b/README.md
+index 256e5c2..75cacc4 100644
+--- a/README.md
++++ b/README.md
+@@ -24,7 +24,8 @@ En el club siempre es miércoles 18 de noviembre de 2026 a las 10:00, salvo que
+ - Para reservar hay que tener la cuota al día (`cuotaActiva`).
+ - Cada socio puede tener como máximo 3 reservas futuras confirmadas.
+ - No se reservan pistas cerradas ni franjas que ya han empezado.
+-- Cancelar es gratis hasta 24 horas antes. Después, solo con `forzar: true`, y se cobra una penalización del 100 % del importe.
++- Cancelar es gratis hasta 24 horas antes. Después, solo con `forzar: true`, y se cobra una penalización del 100 % del importe pagado (después del descuento, si lo hubo).
++- Al reservar se puede usar un código. `BIENVENIDA` descuenta el 50 % solo si el socio no tiene ninguna reserva anterior, cualquiera que sea su estado; se puede usar al crear reservas hasta el 31 de diciembre de 2026 inclusive, según la hora del club. `MANANAS` descuenta 4,00 € en franjas de lunes a viernes que empiezan antes de las 12:00, sin caducidad ni límite de usos. `CLUB10` descuenta el 10 % en cualquier franja y permite hasta tres reservas por socio entre confirmadas y no presentadas, incluidas las pasadas; las canceladas no cuentan. Los códigos no distinguen mayúsculas y aceptan espacios alrededor; no se acumulan.
+ 
+ ## API
+ 
+@@ -45,10 +46,10 @@ En el club siempre es miércoles 18 de noviembre de 2026 a las 10:00, salvo que
+ 
+ - `GET /api/reservas`: lista reservas con filtros opcionales `fecha`, `desde`, `hasta` (por día de inicio, ambos incluidos), `socio`, `pista` y `estado` (`confirmada`, `cancelada` o `no_presentada`), paginada con `limite` (1 a 100, 50 por defecto) y `pagina`. Responde `{ total, pagina, paginas, reservas }`.
+ - `GET /api/reservas/:id`: una reserva. Responde `{ reserva }`.
+-- `POST /api/reservas` con `{ socioId, pistaId, inicio, notas? }`: crea una reserva. Responde `201 { reserva }`. Errores: `SOCIO_NO_ENCONTRADO`, `PISTA_NO_ENCONTRADA`, `FRANJA_INVALIDA`, `CUOTA_INACTIVA`, `PISTA_CERRADA`, `FRANJA_PASADA`, `FRANJA_NO_DISPONIBLE` y `LIMITE_DE_RESERVAS`.
++- `POST /api/reservas` con `{ socioId, pistaId, inicio, notas?, codigo? }`: crea una reserva. `codigo` es un código del catálogo anterior. Responde `201 { reserva }`. Errores: `SOCIO_NO_ENCONTRADO`, `PISTA_NO_ENCONTRADA`, `FRANJA_INVALIDA`, `CUOTA_INACTIVA`, `PISTA_CERRADA`, `FRANJA_PASADA`, `FRANJA_NO_DISPONIBLE`, `LIMITE_DE_RESERVAS`, `CODIGO_INVALIDO` (400), `CODIGO_NO_APLICABLE` (409) y `DATOS_INVALIDOS` (si `codigo` no es texto).
+ - `POST /api/reservas/:id/cancelar` con `{ forzar?, motivo? }`: cancela una reserva. Responde `{ reserva }`. Errores: `RESERVA_NO_ENCONTRADA`, `YA_CANCELADA`, `RESERVA_PASADA` y `FUERA_DE_PLAZO`.
+ 
+-Una reserva tiene `id`, `socioId`, `pistaId`, `inicio`, `fin`, `estado`, `importe`, `notas` y, si se canceló, `penalizacion` y `motivoCancelacion`.
++Una reserva tiene `id`, `socioId`, `pistaId`, `inicio`, `fin`, `estado`, `importeBase` (precio original), `descuento`, `importe` (importe pagado), `notas` y `codigo` si se usó. Si se canceló, puede tener `penalizacion` y `motivoCancelacion`. Listados y detalle devuelven estos campos; disponibilidad sigue mostrando el precio original.
+ 
+ ### Solo para pruebas
+ 
+diff --git a/src/nucleo.ts b/src/nucleo.ts
+index 62ed37b..2392e5e 100644
+--- a/src/nucleo.ts
++++ b/src/nucleo.ts
+@@ -125,7 +125,7 @@ export function crearClub(estado: Estado) {
+       return { reserva: reserva(id) };
+     },
+ 
+-    crearReserva(datos: { socioId?: unknown; pistaId?: unknown; inicio?: unknown; notas?: unknown }) {
++    crearReserva(datos: { socioId?: unknown; pistaId?: unknown; inicio?: unknown; notas?: unknown; codigo?: unknown }) {
+       const { socioId, pistaId, inicio } = datos;
+       if (typeof socioId !== "string" || typeof pistaId !== "string" || typeof inicio !== "string") {
+         invalido("socioId, pistaId e inicio son obligatorios");
+@@ -145,6 +145,31 @@ export function crearClub(estado: Estado) {
+       if (futuras.length >= MAXIMO_RESERVAS_FUTURAS) {
+         throw new ErrorDelClub("LIMITE_DE_RESERVAS", `${socio.nombre} ya tiene ${MAXIMO_RESERVAS_FUTURAS} reservas futuras`);
+       }
++      if (datos.codigo !== undefined && typeof datos.codigo !== "string") invalido("codigo debe ser un texto");
++      const codigo = typeof datos.codigo === "string" ? datos.codigo.trim().toUpperCase() : undefined;
++      if (codigo !== undefined && !["BIENVENIDA", "MANANAS", "CLUB10"].includes(codigo)) {
++        throw new ErrorDelClub("CODIGO_INVALIDO", `No existe el código ${codigo}`, 400);
++      }
++      let descuento = 0;
++      if (codigo === "BIENVENIDA") {
++        if (estado.reservas.some((r) => r.socioId === socio.id) || estado.ahora.slice(0, 10) > "2026-12-31") {
++          throw new ErrorDelClub("CODIGO_NO_APLICABLE", "BIENVENIDA solo se aplica a la primera reserva y hasta el 31 de diciembre de 2026");
++        }
++        descuento = Math.floor(precio(p, inicio as string) / 2);
++      } else if (codigo === "MANANAS") {
++        const fecha = new Date(`${(inicio as string).slice(0, 10)}T00:00:00Z`);
++        const dia = fecha.getUTCDay();
++        if (dia === 0 || dia === 6 || (inicio as string).slice(11) >= "12:00") {
++          throw new ErrorDelClub("CODIGO_NO_APLICABLE", "MANANAS solo se aplica de lunes a viernes antes de las 12:00");
++        }
++        descuento = 400;
++      } else if (codigo === "CLUB10") {
++        const usos = estado.reservas.filter((r) => r.socioId === socio.id && r.codigo === "CLUB10" && r.estado !== "cancelada").length;
++        if (usos >= 3) throw new ErrorDelClub("CODIGO_NO_APLICABLE", "CLUB10 ya se ha usado en tres reservas");
++        descuento = Math.floor(precio(p, inicio as string) / 10);
++      }
++      const importeBase = precio(p, inicio as string);
++      descuento = Math.min(descuento, importeBase);
+       estado.contador += 1;
+       const nueva: Reserva = {
+         id: `R-${String(estado.contador).padStart(4, "0")}`,
+@@ -153,7 +178,10 @@ export function crearClub(estado: Estado) {
+         inicio: inicio as string,
+         fin: finDeFranja(inicio as string),
+         estado: "confirmada",
+-        importe: precio(p, inicio as string),
++        importeBase,
++        descuento,
++        importe: importeBase - descuento,
++        ...(codigo ? { codigo } : {}),
+         notas: (datos.notas as string | undefined) ?? "",
+       };
+       estado.reservas.push(nueva);
+diff --git a/src/semilla.ts b/src/semilla.ts
+index bc45cc7..b30c503 100644
+--- a/src/semilla.ts
++++ b/src/semilla.ts
+@@ -91,6 +91,8 @@ export function crearSemilla(): Estado {
+       inicio,
+       fin: finDeFranja(inicio),
+       estado,
++      importeBase: precio(pista, inicio),
++      descuento: 0,
+       importe: precio(pista, inicio),
+       notas,
+     });
+diff --git a/src/tipos.ts b/src/tipos.ts
+index 41e5915..54ebeb8 100644
+--- a/src/tipos.ts
++++ b/src/tipos.ts
+@@ -26,8 +26,13 @@ export interface Reserva {
+   inicio: string;
+   fin: string;
+   estado: EstadoReserva;
+-  /** Céntimos de euro. */
++  /** Céntimos de euro antes de aplicar el código. */
++  importeBase: number;
++  /** Céntimos de euro descontados. */
++  descuento: number;
++  /** Céntimos de euro pagados. */
+   importe: number;
++  codigo?: string;
+   notas: string;
+   /** Céntimos cobrados al cancelar fuera de plazo. */
+   penalizacion?: number;
+diff --git a/test/club.test.ts b/test/club.test.ts
+index 5dc8821..1cc4a88 100644
+--- a/test/club.test.ts
++++ b/test/club.test.ts
+@@ -37,6 +37,118 @@ test("reservar sigue las reglas del club", async () => {
+   assert.equal(pasada.cuerpo.error.codigo, "FRANJA_PASADA");
+ });
+ 
++test("los códigos aplican descuentos, normalizan formato y aparecen en detalle y listado", async () => {
++  const otra = await arrancarApi();
++  try {
++    const bienvenida = await otra.pedir("POST", "/api/reservas", { cuerpo: { socioId: "socio-041", pistaId: "pista-3", inicio: "2026-11-19T12:00", codigo: "  bienvenida " } });
++    assert.equal(bienvenida.status, 201);
++    assert.deepEqual([bienvenida.cuerpo.reserva.importeBase, bienvenida.cuerpo.reserva.descuento, bienvenida.cuerpo.reserva.importe, bienvenida.cuerpo.reserva.codigo], [1200, 600, 600, "BIENVENIDA"]);
++    assert.deepEqual((await otra.pedir("GET", `/api/reservas/${bienvenida.cuerpo.reserva.id}`)).cuerpo.reserva, bienvenida.cuerpo.reserva);
++    assert.equal((await otra.pedir("GET", "/api/reservas?socio=socio-041")).cuerpo.reservas[0].codigo, "BIENVENIDA");
++    const mananas = await otra.pedir("POST", "/api/reservas", { cuerpo: { socioId: "socio-006", pistaId: "pista-1", inicio: "2026-11-20T09:00", codigo: "MANANAS" } });
++    assert.equal(mananas.status, 201);
++    assert.deepEqual([mananas.cuerpo.reserva.importeBase, mananas.cuerpo.reserva.descuento, mananas.cuerpo.reserva.importe], [1800, 400, 1400]);
++    const club10 = await otra.pedir("POST", "/api/reservas", { cuerpo: { socioId: "socio-007", pistaId: "pista-2", inicio: "2026-11-20T09:00", codigo: "club10" } });
++    assert.equal(club10.status, 201);
++    assert.deepEqual([club10.cuerpo.reserva.importeBase, club10.cuerpo.reserva.descuento, club10.cuerpo.reserva.importe], [1800, 180, 1620]);
++    const sinCodigo = await otra.pedir("POST", "/api/reservas", { cuerpo: { socioId: "socio-008", pistaId: "pista-2", inicio: "2026-11-20T10:30" } });
++    assert.equal(sinCodigo.status, 201);
++    assert.deepEqual([sinCodigo.cuerpo.reserva.importeBase, sinCodigo.cuerpo.reserva.descuento, sinCodigo.cuerpo.reserva.importe, sinCodigo.cuerpo.reserva.codigo], [1800, 0, 1800, undefined]);
++    const disponibilidad = await otra.pedir("GET", "/api/disponibilidad?fecha=2026-11-20&pista=pista-1");
++    assert.equal(disponibilidad.status, 200);
++    assert.equal(disponibilidad.cuerpo.pistas[0].franjas[0].precio, 1800);
++  } finally { otra.cerrar(); }
++});
++
++test("condiciones, caducidad inclusiva, códigos vacíos e historial en cualquier estado", async () => {
++  const bienvenidaHasta = await arrancarApi({ AHORA: "2026-12-31T23:59" });
++  const bienvenidaCaducada = await arrancarApi({ AHORA: "2027-01-01T00:00" });
++  const historial = await arrancarApi();
++  try {
++    const válida = await bienvenidaHasta.pedir("POST", "/api/reservas", { cuerpo: { socioId: "socio-041", pistaId: "pista-3", inicio: "2027-01-04T09:00", codigo: "BIENVENIDA" } });
++    assert.equal(válida.status, 201);
++    const caducada = await bienvenidaCaducada.pedir("POST", "/api/reservas", { cuerpo: { socioId: "socio-041", pistaId: "pista-3", inicio: "2027-01-04T09:00", codigo: "BIENVENIDA" } });
++    assert.equal(caducada.status, 409);
++    assert.equal(caducada.cuerpo.error.codigo, "CODIGO_NO_APLICABLE");
++    const yaReservo = await historial.pedir("POST", "/api/reservas", { cuerpo: { socioId: "socio-002", pistaId: "pista-3", inicio: "2026-11-24T12:00", codigo: "BIENVENIDA" } });
++    assert.equal(yaReservo.status, 409);
++    assert.equal(yaReservo.cuerpo.error.codigo, "CODIGO_NO_APLICABLE");
++    const tarde = await historial.pedir("POST", "/api/reservas", { cuerpo: { socioId: "socio-006", pistaId: "pista-3", inicio: "2026-11-21T16:30", codigo: "MANANAS" } });
++    assert.equal(tarde.status, 409);
++    assert.equal(tarde.cuerpo.error.codigo, "CODIGO_NO_APLICABLE");
++    for (const codigo of ["", "   "]) {
++      const vacío = await historial.pedir("POST", "/api/reservas", { cuerpo: { socioId: "socio-006", pistaId: "pista-3", inicio: "2026-11-24T12:00", codigo } });
++      assert.equal(vacío.status, 400);
++      assert.equal(vacío.cuerpo.error.codigo, "CODIGO_INVALIDO");
++    }
++    const desconocido = await historial.pedir("POST", "/api/reservas", { cuerpo: { socioId: "socio-006", pistaId: "pista-3", inicio: "2026-11-24T12:00", codigo: "desconocido" } });
++    assert.equal(desconocido.status, 400);
++    assert.equal(desconocido.cuerpo.error.codigo, "CODIGO_INVALIDO");
++    const tipos = await historial.pedir("POST", "/api/reservas", { cuerpo: { socioId: "socio-006", pistaId: "pista-3", inicio: "2026-11-24T12:00", codigo: 10 } });
++    assert.equal(tipos.status, 400);
++    assert.equal(tipos.cuerpo.error.codigo, "DATOS_INVALIDOS");
++    await historial.pedir("POST", "/_reloj", { cuerpo: { ahora: "2026-11-24T14:00" } });
++    for (const [estadoReserva, socioId] of [["confirmada", "socio-009"], ["cancelada", "socio-029"], ["no_presentada", "socio-017"]]) {
++      const estado = await historial.pedir("GET", "/_estado");
++      assert.ok(estado.cuerpo.reservas.some((r: any) => r.socioId === socioId && r.estado === estadoReserva), `debe existir historial ${estadoReserva}`);
++      const resultado = await historial.pedir("POST", "/api/reservas", { cuerpo: { socioId, pistaId: "pista-3", inicio: "2026-11-26T13:30", codigo: "BIENVENIDA" } });
++      assert.equal(resultado.status, 409);
++      assert.equal(resultado.cuerpo.error.codigo, "CODIGO_NO_APLICABLE");
++    }
++  } finally { bienvenidaHasta.cerrar(); bienvenidaCaducada.cerrar(); historial.cerrar(); }
++});
++
++test("la penalización cobra el importe descontado y las canceladas no consumen CLUB10", async () => {
++  const otra = await arrancarApi();
++  try {
++  const creada = await otra.pedir("POST", "/api/reservas", { cuerpo: { socioId: "socio-006", pistaId: "pista-2", inicio: "2026-11-19T09:00", codigo: "MANANAS" } });
++  assert.equal(creada.status, 201);
++  await otra.pedir("POST", "/_reloj", { cuerpo: { ahora: "2026-11-19T08:30" } });
++  const cancelada = await otra.pedir("POST", `/api/reservas/${creada.cuerpo.reserva.id}/cancelar`, { cuerpo: { forzar: true } });
++  assert.equal(cancelada.status, 200);
++  assert.equal(cancelada.cuerpo.reserva.penalizacion, 1400);
++  } finally {
++    otra.cerrar();
++  }
++  const usos = await arrancarApi();
++  try {
++    const ids: string[] = [];
++    for (const inicio of ["2026-11-20T09:00", "2026-11-20T10:30", "2026-11-20T12:00"]) {
++      const respuesta = await usos.pedir("POST", "/api/reservas", { cuerpo: { socioId: "socio-041", pistaId: "pista-1", inicio, codigo: "CLUB10" } });
++      assert.equal(respuesta.status, 201);
++      ids.push(respuesta.cuerpo.reserva.id);
++    }
++    const cancelada = await usos.pedir("POST", `/api/reservas/${ids[0]}/cancelar`);
++    assert.equal(cancelada.status, 200);
++    // Separar el límite de tres futuras de la regla de usos del código.
++    await usos.pedir("POST", "/_reloj", { cuerpo: { ahora: "2026-11-20T12:01" } });
++    const cuarta = await usos.pedir("POST", "/api/reservas", { cuerpo: { socioId: "socio-041", pistaId: "pista-1", inicio: "2026-11-20T13:30", codigo: "CLUB10" } });
++    assert.equal(cuarta.status, 201);
++    await usos.pedir("POST", "/_reloj", { cuerpo: { ahora: "2026-11-20T13:31" } });
++    const quinta = await usos.pedir("POST", "/api/reservas", { cuerpo: { socioId: "socio-041", pistaId: "pista-1", inicio: "2026-11-20T15:00", codigo: "CLUB10" } });
++    assert.equal(quinta.status, 409);
++    assert.equal(quinta.cuerpo.error.codigo, "CODIGO_NO_APLICABLE");
++  } finally { usos.cerrar(); }
++});
++
++test("las reglas de reserva preceden a códigos incorrectos y no consumen usos", async () => {
++  const otra = await arrancarApi();
++  try {
++    const cuota = await otra.pedir("POST", "/api/reservas", { cuerpo: { socioId: "socio-011", pistaId: "pista-1", inicio: "2026-11-20T09:00", codigo: 7 } });
++    assert.equal(cuota.status, 409);
++    assert.equal(cuota.cuerpo.error.codigo, "CUOTA_INACTIVA");
++    const cerrada = await otra.pedir("POST", "/api/reservas", { cuerpo: { socioId: "socio-006", pistaId: "pista-4", inicio: "2026-11-20T09:00", codigo: 7 } });
++    assert.equal(cerrada.status, 409);
++    assert.equal(cerrada.cuerpo.error.codigo, "PISTA_CERRADA");
++    const occupied = await otra.pedir("POST", "/api/reservas", { cuerpo: { socioId: "socio-006", pistaId: "pista-1", inicio: "2026-11-19T19:30", codigo: 7 } });
++    assert.equal(occupied.status, 409);
++    assert.equal(occupied.cuerpo.error.codigo, "FRANJA_NO_DISPONIBLE");
++    const válida = await otra.pedir("POST", "/api/reservas", { cuerpo: { socioId: "socio-007", pistaId: "pista-2", inicio: "2026-11-20T09:00", codigo: "CLUB10" } });
++    assert.equal(válida.status, 201);
++    assert.equal(válida.cuerpo.reserva.codigo, "CLUB10");
++  } finally { otra.cerrar(); }
++});
++
+ test("cancelar: gratis hasta 24 horas antes y, después, solo con forzar y penalización", async () => {
+   const fuera = await api.pedir("POST", "/api/reservas/R-0520/cancelar");
+   assert.equal(fuera.status, 409);

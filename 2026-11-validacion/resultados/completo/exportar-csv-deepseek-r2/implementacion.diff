@@ -1,0 +1,323 @@
+diff --git a/README.md b/README.md
+index 256e5c2..849a46a 100644
+--- a/README.md
++++ b/README.md
+@@ -45,6 +45,7 @@ En el club siempre es miércoles 18 de noviembre de 2026 a las 10:00, salvo que
+ 
+ - `GET /api/reservas`: lista reservas con filtros opcionales `fecha`, `desde`, `hasta` (por día de inicio, ambos incluidos), `socio`, `pista` y `estado` (`confirmada`, `cancelada` o `no_presentada`), paginada con `limite` (1 a 100, 50 por defecto) y `pagina`. Responde `{ total, pagina, paginas, reservas }`.
+ - `GET /api/reservas/:id`: una reserva. Responde `{ reserva }`.
++- `GET /api/reservas/exportar?desde=AAAA-MM-DD&hasta=AAAA-MM-DD[&estado=<estado>]`: las reservas que empiezan entre esos dos días, ambos incluidos, en CSV para una hoja de cálculo. `desde` y `hasta` son obligatorios y el periodo puede abarcar como mucho 92 días contando los dos extremos. `estado` es opcional (`confirmada`, `cancelada` o `no_presentada`). **Solo para gestores:** sin `X-Socio` responde `401 NO_IDENTIFICADO` y con un socio que no es gestor, `403 SIN_PERMISO`. Responde `200` con `content-type: text/csv; charset=utf-8` y `content-disposition: attachment; filename="reservas-<desde>-<hasta>.csv"`. Cada línea termina en CRLF y la primera es la cabecera `id,fecha,hora,pista,socio,email,estado,importe,penalizacion,notas`, con una fila por reserva ordenada por inicio y, a igualdad, por pista. `fecha` y `hora` son el día y la hora de inicio, `pista`, `socio` y `email` van con su nombre, e `importe` y `penalizacion` en euros con dos decimales (la penalización va vacía si no la hay). Los campos con comas, comillas dobles o saltos de línea van entre comillas, duplicando las comillas de dentro (RFC 4180). Errores: `DATOS_INVALIDOS` si faltan `desde` o `hasta`, su formato no es `AAAA-MM-DD`, `desde` es posterior a `hasta` o `estado` no vale, y `RANGO_DEMASIADO_GRANDE` si el periodo supera los 92 días.
+ - `POST /api/reservas` con `{ socioId, pistaId, inicio, notas? }`: crea una reserva. Responde `201 { reserva }`. Errores: `SOCIO_NO_ENCONTRADO`, `PISTA_NO_ENCONTRADA`, `FRANJA_INVALIDA`, `CUOTA_INACTIVA`, `PISTA_CERRADA`, `FRANJA_PASADA`, `FRANJA_NO_DISPONIBLE` y `LIMITE_DE_RESERVAS`.
+ - `POST /api/reservas/:id/cancelar` con `{ forzar?, motivo? }`: cancela una reserva. Responde `{ reserva }`. Errores: `RESERVA_NO_ENCONTRADA`, `YA_CANCELADA`, `RESERVA_PASADA` y `FUERA_DE_PLAZO`.
+ 
+diff --git a/src/nucleo.ts b/src/nucleo.ts
+index 62ed37b..86061e6 100644
+--- a/src/nucleo.ts
++++ b/src/nucleo.ts
+@@ -1,6 +1,6 @@
+ // Las operaciones del club y sus reglas. La API HTTP (src/servidor.ts) es la única que las llama.
+ import { finDeFranja, HORAS, precio } from "./semilla.ts";
+-import type { Estado, EstadoReserva, Reserva } from "./tipos.ts";
++import type { Estado, EstadoReserva, Reserva, Socio } from "./tipos.ts";
+ 
+ export class ErrorDelClub extends Error {
+   codigo: string;
+@@ -18,11 +18,28 @@ export const LIMITE_MAXIMO = 100;
+ export const LIMITE_POR_DEFECTO = 50;
+ export const MAXIMO_RESERVAS_FUTURAS = 3;
+ export const HORAS_CANCELACION_GRATUITA = 24;
++/** Días que puede abarcar como mucho una exportación, contando los dos extremos. */
++export const DIAS_MAXIMOS_EXPORTACION = 92;
++
++const ESTADOS: readonly EstadoReserva[] = ["confirmada", "cancelada", "no_presentada"];
++const MS_POR_DIA = 86_400_000;
++
++const CABECERA_CSV = "id,fecha,hora,pista,socio,email,estado,importe,penalizacion,notas";
+ 
+ function invalido(mensaje: string): never {
+   throw new ErrorDelClub("DATOS_INVALIDOS", mensaje, 400);
+ }
+ 
++/** Un campo CSV según el RFC 4180: entre comillas si tiene coma, comillas o saltos de línea. */
++function campoCsv(valor: string): string {
++  return /[",\r\n]/.test(valor) ? `"${valor.replaceAll('"', '""')}"` : valor;
++}
++
++/** Céntimos de euro a euros con dos decimales y punto decimal: 1800 → "18.00". */
++function euros(centimos: number): string {
++  return (centimos / 100).toFixed(2);
++}
++
+ function sinAcentos(texto: string): string {
+   return texto.toLowerCase().normalize("NFD").replace(/[̀-ͯ]/g, "");
+ }
+@@ -42,6 +59,12 @@ export interface FiltrosReservas {
+   pagina?: number;
+ }
+ 
++export interface FiltrosExportacion {
++  desde?: unknown;
++  hasta?: unknown;
++  estado?: unknown;
++}
++
+ export function crearClub(estado: Estado) {
+   const pista = (id: string) => {
+     const encontrada = estado.pistas.find((p) => p.id === id);
+@@ -125,6 +148,56 @@ export function crearClub(estado: Estado) {
+       return { reserva: reserva(id) };
+     },
+ 
++    /** Las reservas de un periodo en CSV (RFC 4180), solo para gestores. */
++    exportarReservas(quien: Socio | undefined, f: FiltrosExportacion) {
++      if (!quien) throw new ErrorDelClub("NO_IDENTIFICADO", "Para exportar las reservas hay que identificarse con la cabecera X-Socio", 401);
++      if (quien.rol !== "gestor") throw new ErrorDelClub("SIN_PERMISO", "Solo los gestores pueden exportar las reservas", 403);
++
++      const dia = (valor: unknown, nombre: string): number => {
++        if (typeof valor !== "string" || !FECHA.test(valor)) invalido(`${nombre} es obligatorio, con el formato AAAA-MM-DD`);
++        const ms = Date.parse(`${valor}T12:00:00Z`);
++        if (!Number.isFinite(ms)) invalido(`${nombre} no es una fecha válida`);
++        return ms;
++      };
++      const desde = f.desde as string;
++      const hasta = f.hasta as string;
++      const dias = (dia(hasta, "hasta") - dia(desde, "desde")) / MS_POR_DIA + 1;
++      if (dias < 1) invalido("desde no puede ser posterior a hasta");
++      if (dias > DIAS_MAXIMOS_EXPORTACION) {
++        throw new ErrorDelClub("RANGO_DEMASIADO_GRANDE", `El periodo puede abarcar como mucho ${DIAS_MAXIMOS_EXPORTACION} días contando los dos extremos`, 400);
++      }
++      if (f.estado !== undefined && !ESTADOS.includes(f.estado as EstadoReserva)) {
++        invalido('estado debe ser "confirmada", "cancelada" o "no_presentada"');
++      }
++      const filtroEstado = f.estado as EstadoReserva | undefined;
++
++      const delPeriodo = estado.reservas
++        .filter((r) => r.inicio.slice(0, 10) >= desde && r.inicio.slice(0, 10) <= hasta)
++        .filter((r) => filtroEstado === undefined || r.estado === filtroEstado)
++        .sort((a, b) => (a.inicio === b.inicio ? a.pistaId.localeCompare(b.pistaId) : a.inicio.localeCompare(b.inicio)));
++
++      const filas = delPeriodo.map((r) => {
++        const s = estado.socios.find((socio) => socio.id === r.socioId);
++        return [
++          r.id,
++          r.inicio.slice(0, 10),
++          r.inicio.slice(11, 16),
++          pista(r.pistaId).nombre,
++          s?.nombre ?? r.socioId,
++          s?.email ?? "",
++          r.estado,
++          euros(r.importe),
++          r.penalizacion === undefined ? "" : euros(r.penalizacion),
++          r.notas,
++        ].map(campoCsv).join(",");
++      });
++
++      return {
++        nombreFichero: `reservas-${desde}-${hasta}.csv`,
++        contenido: [CABECERA_CSV, ...filas].map((linea) => `${linea}\r\n`).join(""),
++      };
++    },
++
+     crearReserva(datos: { socioId?: unknown; pistaId?: unknown; inicio?: unknown; notas?: unknown }) {
+       const { socioId, pistaId, inicio } = datos;
+       if (typeof socioId !== "string" || typeof pistaId !== "string" || typeof inicio !== "string") {
+diff --git a/src/servidor.ts b/src/servidor.ts
+index a6a7764..bfb377e 100644
+--- a/src/servidor.ts
++++ b/src/servidor.ts
+@@ -44,8 +44,8 @@ function identificar(req: IncomingMessage): Socio | undefined {
+ 
+ type Operacion = { nombre: string; argumentos: unknown; ejecutar: () => unknown };
+ 
+-// `quien` es el socio que hace la petición (cabecera X-Socio). Las operaciones actuales no lo usan.
+-async function resolver(req: IncomingMessage, url: URL, _quien: Socio | undefined): Promise<Operacion> {
++// `quien` es el socio que hace la petición (cabecera X-Socio).
++async function resolver(req: IncomingMessage, url: URL, quien: Socio | undefined): Promise<Operacion> {
+   const metodo = req.method ?? "GET";
+   const partes = url.pathname.split("/").filter(Boolean);
+   const q = url.searchParams;
+@@ -84,6 +84,10 @@ async function resolver(req: IncomingMessage, url: URL, _quien: Socio | undefine
+     const cuerpo = await leerCuerpo(req);
+     return { nombre: "crearReserva", argumentos: cuerpo, ejecutar: () => club.crearReserva(cuerpo) };
+   }
++  if (recurso === "reservas" && id === "exportar" && !accion && metodo === "GET") {
++    const argumentos = { desde: q.get("desde") ?? undefined, hasta: q.get("hasta") ?? undefined, estado: q.get("estado") ?? undefined };
++    return { nombre: "exportarReservas", argumentos, ejecutar: () => club.exportarReservas(quien, argumentos) };
++  }
+   if (recurso === "reservas" && id && !accion && metodo === "GET") {
+     return { nombre: "obtenerReserva", argumentos: { reservaId: id }, ejecutar: () => club.obtenerReserva(id) };
+   }
+@@ -131,6 +135,14 @@ const servidor = createServer(async (req, res) => {
+     operacion = await resolver(req, url, quien);
+     const resultado = operacion.ejecutar();
+     anotar(true);
++    if (operacion.nombre === "exportarReservas") {
++      const { nombreFichero, contenido } = resultado as { nombreFichero: string; contenido: string };
++      res.writeHead(200, {
++        "content-type": "text/csv; charset=utf-8",
++        "content-disposition": `attachment; filename="${nombreFichero}"`,
++      });
++      return res.end(contenido);
++    }
+     responder(operacion.nombre === "crearReserva" ? 201 : 200, resultado);
+   } catch (error) {
+     if (error instanceof ErrorDelClub) {
+diff --git a/test/exportar-csv.test.ts b/test/exportar-csv.test.ts
+new file mode 100644
+index 0000000..f8e9228
+--- /dev/null
++++ b/test/exportar-csv.test.ts
+@@ -0,0 +1,153 @@
++// La exportación de reservas a CSV: permisos, formato y validación del periodo.
++import assert from "node:assert/strict";
++import { after, before, test } from "node:test";
++import { arrancarApi, type Api } from "./ayuda.ts";
++
++const GESTOR = "socio-040";
++const CABECERA = "id,fecha,hora,pista,socio,email,estado,importe,penalizacion,notas";
++
++let api: Api;
++before(async () => {
++  api = await arrancarApi();
++});
++after(() => api.cerrar());
++
++/** Trocea un CSV de líneas simples (sin saltos de línea dentro de campos) y comprueba el CRLF final. */
++function lineas(csv: string): string[] {
++  assert.ok(csv.endsWith("\r\n"), "el CSV debe terminar en CRLF");
++  const trozos = csv.split("\r\n");
++  assert.equal(trozos.at(-1), "", "no debe quedar nada después del último CRLF");
++  return trozos.slice(0, -1);
++}
++
++function exportar(consulta: string) {
++  return api.pedir("GET", `/api/reservas/exportar?${consulta}`, { socio: GESTOR });
++}
++
++test("solo un gestor puede exportar", async () => {
++  const sinSocio = await api.pedir("GET", "/api/reservas/exportar?desde=2026-11-19&hasta=2026-11-19");
++  assert.equal(sinSocio.status, 401);
++  assert.equal(sinSocio.cuerpo.error.codigo, "NO_IDENTIFICADO");
++
++  const noGestor = await api.pedir("GET", "/api/reservas/exportar?desde=2026-11-19&hasta=2026-11-19", { socio: "socio-004" });
++  assert.equal(noGestor.status, 403);
++  assert.equal(noGestor.cuerpo.error.codigo, "SIN_PERMISO");
++
++  const desconocido = await api.pedir("GET", "/api/reservas/exportar?desde=2026-11-19&hasta=2026-11-19", { socio: "socio-999" });
++  assert.equal(desconocido.status, 401);
++  assert.equal(desconocido.cuerpo.error.codigo, "NO_IDENTIFICADO");
++});
++
++test("responde 200 con el CSV y su nombre de fichero", async () => {
++  const r = await exportar("desde=2026-11-01&hasta=2026-11-07");
++  assert.equal(r.status, 200);
++  assert.equal(r.cabeceras.get("content-type"), "text/csv; charset=utf-8");
++  assert.equal(r.cabeceras.get("content-disposition"), 'attachment; filename="reservas-2026-11-01-2026-11-07.csv"');
++  assert.equal(typeof r.cuerpo, "string", "el cuerpo no es JSON");
++  assert.ok(r.texto.startsWith(CABECERA + "\r\n"));
++});
++
++test("la cabecera es exacta y cada línea termina en CRLF", async () => {
++  const csv = (await exportar("desde=2026-11-19&hasta=2026-11-19")).texto;
++  const filas = lineas(csv);
++  assert.equal(filas[0], CABECERA);
++  assert.deepEqual(filas[0]!.split(","), ["id", "fecha", "hora", "pista", "socio", "email", "estado", "importe", "penalizacion", "notas"]);
++  assert.equal(csv.split("\r\n").length - 1, filas.length, "no hay saltos de línea sueltos");
++});
++
++test("hay una fila por reserva del periodo, ordenadas por inicio y pista", async () => {
++  const estado = (await api.pedir("GET", "/_estado")).cuerpo;
++  const esperadas = estado.reservas
++    .filter((r: any) => r.inicio.slice(0, 10) >= "2026-11-19" && r.inicio.slice(0, 10) <= "2026-11-21")
++    .sort((a: any, b: any) => (a.inicio === b.inicio ? a.pistaId.localeCompare(b.pistaId) : a.inicio.localeCompare(b.inicio)));
++
++  const filas = lineas((await exportar("desde=2026-11-19&hasta=2026-11-21")).texto).slice(1);
++  assert.deepEqual(filas.map((f) => f.split(",")[0]), esperadas.map((r: any) => r.id));
++
++  // `pista` lleva el nombre de la pista, no su id.
++  const nombres = esperadas.map((r: any) => `,${estado.pistas.find((p: any) => p.id === r.pistaId).nombre},`);
++  filas.forEach((fila, i) => assert.ok(fila.includes(nombres[i]!), `${fila} debe incluir el nombre de la pista`));
++});
++
++test("los importes van en euros con dos decimales y la penalización vacía si no la hay", async () => {
++  const estado = (await api.pedir("GET", "/_estado")).cuerpo;
++  const filas = lineas((await exportar("desde=2026-11-19&hasta=2026-11-19")).texto).slice(1);
++  for (const fila of filas) {
++    const campos = fila.split(",");
++    const reserva = estado.reservas.find((r: any) => r.id === campos[0]);
++    assert.equal(campos[7], (reserva.importe / 100).toFixed(2), `${reserva.id}: importe en euros`);
++    assert.equal(campos[8], reserva.penalizacion === undefined ? "" : (reserva.penalizacion / 100).toFixed(2), `${reserva.id}: penalización`);
++  }
++  // El 09:00 del jueves en la pista 3 vale 12,00 € y no tiene penalización.
++  const marta = estado.reservas.find((r: any) => r.inicio === "2026-11-19T09:00" && r.pistaId === "pista-3");
++  const suya = filas.find((f) => f.startsWith(`${marta.id},`))!;
++  assert.equal(suya.split(",")[7], "12.00");
++  assert.equal(suya.split(",")[8], "");
++});
++
++test("una cancelación con penalización sale en euros", async () => {
++  const estado = (await api.pedir("GET", "/_estado")).cuerpo;
++  // Una reserva de las próximas 24 horas: se cancela solo con forzar y con penalización.
++  const candidata = estado.reservas.find((r: any) => r.estado === "confirmada" && r.inicio > "2026-11-18T10:00" && r.inicio < "2026-11-19T10:00");
++  const cancelada = await api.pedir("POST", `/api/reservas/${candidata.id}/cancelar`, { cuerpo: { forzar: true } });
++  assert.equal(cancelada.status, 200);
++
++  const dia = candidata.inicio.slice(0, 10);
++  const filas = lineas((await exportar(`desde=${dia}&hasta=${dia}`)).texto).slice(1);
++  const campos = filas.find((f) => f.startsWith(`${candidata.id},`))!.split(",");
++  assert.equal(campos[6], "cancelada");
++  assert.equal(campos[8], (candidata.importe / 100).toFixed(2));
++});
++
++test("los campos con comas, comillas o saltos de línea se escapan según el RFC 4180", async () => {
++  const disponibilidad = (await api.pedir("GET", "/api/disponibilidad?fecha=2026-11-24&pista=pista-1")).cuerpo;
++  const libre = disponibilidad.pistas[0].franjas.find((f: any) => f.estado === "libre");
++  const notas = 'Palas, bolas "nuevas"\ny red';
++  const creada = await api.pedir("POST", "/api/reservas", { cuerpo: { socioId: "socio-041", pistaId: "pista-1", inicio: libre.inicio, notas } });
++  assert.equal(creada.status, 201);
++
++  const csv = (await exportar("desde=2026-11-24&hasta=2026-11-24")).texto;
++  const fila = `${creada.cuerpo.reserva.id},2026-11-24,${libre.inicio.slice(11)},Pista 1,Nora Benítez,nora.benitez@example.com,confirmada,${(creada.cuerpo.reserva.importe / 100).toFixed(2)},,"Palas, bolas ""nuevas""\ny red"`;
++  assert.ok(csv.includes(fila + "\r\n"), csv);
++  // Los campos que no lo necesitan van sin comillas.
++  assert.ok(csv.includes(`,Pista 1,Nora Benítez,nora.benitez@example.com,confirmada,`), csv);
++});
++
++test("desde y hasta son obligatorios, válidos y en orden", async () => {
++  for (const consulta of ["", "hasta=2026-11-19", "desde=2026-11-19", "desde=2026-1-9&hasta=2026-11-19", "desde=2026-11-20&hasta=2026-11-19"]) {
++    const r = await exportar(consulta);
++    assert.equal(r.status, 400, `«${consulta}» debe dar 400`);
++    assert.equal(r.cuerpo.error.codigo, "DATOS_INVALIDOS", `«${consulta}»`);
++  }
++});
++
++test("el periodo abarca como mucho 92 días contando los dos extremos", async () => {
++  const justo = await exportar("desde=2026-10-01&hasta=2026-12-31");
++  assert.equal(justo.status, 200);
++  const pasado = await exportar("desde=2026-09-30&hasta=2026-12-31");
++  assert.equal(pasado.status, 400);
++  assert.equal(pasado.cuerpo.error.codigo, "RANGO_DEMASIADO_GRANDE");
++});
++
++test("el filtro por estado es opcional y solo admite los tres estados", async () => {
++  const estado = (await api.pedir("GET", "/_estado")).cuerpo;
++  for (const filtro of ["confirmada", "cancelada", "no_presentada"]) {
++    const esperadas = estado.reservas.filter((r: any) => r.inicio.slice(0, 10) >= "2026-10-01" && r.inicio.slice(0, 10) <= "2026-10-10" && r.estado === filtro);
++    const filas = lineas((await exportar(`desde=2026-10-01&hasta=2026-10-10&estado=${filtro}`)).texto).slice(1);
++    assert.equal(filas.length, esperadas.length, `estado=${filtro}`);
++    assert.ok(filas.every((f) => f.split(",")[6] === filtro), `estado=${filtro}`);
++  }
++
++  const malo = await exportar("desde=2026-10-01&hasta=2026-10-10&estado=pendiente");
++  assert.equal(malo.status, 400);
++  assert.equal(malo.cuerpo.error.codigo, "DATOS_INVALIDOS");
++});
++
++test("GET /api/reservas no cambia", async () => {
++  const r = await api.pedir("GET", "/api/reservas?desde=2026-10-01&hasta=2026-10-31&limite=1");
++  assert.equal(r.status, 200);
++  assert.equal(r.cabeceras.get("content-type"), "application/json; charset=utf-8");
++  assert.deepEqual(Object.keys(r.cuerpo).sort(), ["pagina", "paginas", "reservas", "total"]);
++  assert.equal(r.cuerpo.total, 315);
++  assert.equal(r.cuerpo.reservas.length, 1);
++});

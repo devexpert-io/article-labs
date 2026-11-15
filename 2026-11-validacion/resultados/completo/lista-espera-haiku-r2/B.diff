@@ -1,0 +1,694 @@
+diff --git a/README.md b/README.md
+index 256e5c2..493a28f 100644
+--- a/README.md
++++ b/README.md
+@@ -25,6 +25,13 @@ En el club siempre es miércoles 18 de noviembre de 2026 a las 10:00, salvo que
+ - Cada socio puede tener como máximo 3 reservas futuras confirmadas.
+ - No se reservan pistas cerradas ni franjas que ya han empezado.
+ - Cancelar es gratis hasta 24 horas antes. Después, solo con `forzar: true`, y se cobra una penalización del 100 % del importe.
++- **Lista de espera:** un socio puede apuntarse a una franja ocupada. Cada socio gestiona sus esperas con `X-Socio` (un gestor puede consultar y retirar las de cualquiera).
++  - Solo se puede esperar una franja ocupada, con las mismas comprobaciones que al reservar (pista, cuota, franja válida y no empezada). No puede estar ya en la lista de esa franja ni tenerla reservada, y como mucho puede tener 2 esperas activas.
++  - La posición es el orden de llegada entre las esperas activas de la franja, empezando por 1.
++  - Si el socio reserva después directamente la franja en la que espera, su espera pasa a `retirada`.
++  - Cuando se cancela una reserva confirmada, la franja se asigna al primero de la lista: se crea una reserva confirmada a su nombre, con el precio de la franja y la nota `Asignada desde la lista de espera`. Si al primero no le dejarían reservar (sin cuota al día o con 3 reservas futuras), su espera pasa a `descartada` y se prueba el siguiente. Si la pista está cerrada, no se asigna a nadie.
++  - Cuando una franja empieza, sus esperas caducan: dejan de aparecer, no se asignan y no cuentan para el límite. La caducidad es implícita (la franja ya ha empezado): el estado interno de la espera no cambia y sigue `activa` en `GET /_estado`.
++  - No se avisa a nadie: basta con que la reserva aparezca a su nombre.
+ 
+ ## API
+ 
+@@ -46,10 +53,20 @@ En el club siempre es miércoles 18 de noviembre de 2026 a las 10:00, salvo que
+ - `GET /api/reservas`: lista reservas con filtros opcionales `fecha`, `desde`, `hasta` (por día de inicio, ambos incluidos), `socio`, `pista` y `estado` (`confirmada`, `cancelada` o `no_presentada`), paginada con `limite` (1 a 100, 50 por defecto) y `pagina`. Responde `{ total, pagina, paginas, reservas }`.
+ - `GET /api/reservas/:id`: una reserva. Responde `{ reserva }`.
+ - `POST /api/reservas` con `{ socioId, pistaId, inicio, notas? }`: crea una reserva. Responde `201 { reserva }`. Errores: `SOCIO_NO_ENCONTRADO`, `PISTA_NO_ENCONTRADA`, `FRANJA_INVALIDA`, `CUOTA_INACTIVA`, `PISTA_CERRADA`, `FRANJA_PASADA`, `FRANJA_NO_DISPONIBLE` y `LIMITE_DE_RESERVAS`.
+-- `POST /api/reservas/:id/cancelar` con `{ forzar?, motivo? }`: cancela una reserva. Responde `{ reserva }`. Errores: `RESERVA_NO_ENCONTRADA`, `YA_CANCELADA`, `RESERVA_PASADA` y `FUERA_DE_PLAZO`.
++- `POST /api/reservas/:id/cancelar` con `{ forzar?, motivo? }`: cancela una reserva. Responde `{ reserva, asignadaA }`, donde `asignadaA` es el id de la reserva creada desde la lista de espera de esa franja, o `null` si no se asignó a nadie. Errores: `RESERVA_NO_ENCONTRADA`, `YA_CANCELADA`, `RESERVA_PASADA` y `FUERA_DE_PLAZO`.
+ 
+ Una reserva tiene `id`, `socioId`, `pistaId`, `inicio`, `fin`, `estado`, `importe`, `notas` y, si se canceló, `penalizacion` y `motivoCancelacion`.
+ 
++### Lista de espera
++
++Todas las rutas necesitan la cabecera `X-Socio`; sin ella responden `401 NO_IDENTIFICADO`.
++
++- `POST /api/esperas` con `{ pistaId, inicio }`: apunta a quien llama a la lista de esa franja. Responde `201 { espera }`. Errores: `PISTA_NO_ENCONTRADA`, `PISTA_CERRADA`, `FRANJA_INVALIDA`, `FRANJA_PASADA`, `CUOTA_INACTIVA`, `FRANJA_LIBRE` (la franja se puede reservar directamente), `YA_RESERVADA`, `YA_EN_ESPERA` y `LIMITE_DE_ESPERAS`.
++- `GET /api/esperas[?socio=<id>]`: las esperas activas de quien llama, con su `posicion`. Un gestor puede pedir las de otro socio con `socio`; un socio que lo pida de otro responde `403 SIN_PERMISO`. Responde `{ esperas }`.
++- `DELETE /api/esperas/:id`: retira la espera, que pasa a `retirada`, y los de detrás suben un puesto. Solo puede hacerlo su dueño o un gestor (`403 SIN_PERMISO`). Responde `{ espera }`. Errores: `ESPERA_NO_ENCONTRADA` y `ESPERA_NO_ACTIVA` (si ya no está activa o su franja ha empezado).
++
++Una espera tiene `id`, `socioId`, `pistaId`, `inicio` y `estado` (`activa`, `retirada`, `asignada` o `descartada`). Mientras está activa y su franja no ha empezado, tiene también `posicion`.
++
+ ### Solo para pruebas
+ 
+ - `GET /_estado`: el estado completo del club.
+diff --git a/docs/specs/lista-espera.md b/docs/specs/lista-espera.md
+index fc84e24..861abed 100644
+--- a/docs/specs/lista-espera.md
++++ b/docs/specs/lista-espera.md
+@@ -1,7 +1,7 @@
+ # Spec: lista de espera de franjas
+ 
+ - **id:** `lista-espera`
+-- **Estado:** pendiente de implementar
++- **Estado:** implementada
+ 
+ ## Objetivo
+ 
+@@ -33,11 +33,11 @@ Una espera tiene `id`, `socioId`, `pistaId`, `inicio`, `estado` (`activa`, `reti
+ 2. **Solo franjas que se pueden esperar.** Si la franja está libre, `409 FRANJA_LIBRE`, porque se puede reservar directamente. Valen las mismas comprobaciones que al reservar: la pista existe (`404 PISTA_NO_ENCONTRADA`) y está operativa (`409 PISTA_CERRADA`), la franja es válida (`400 FRANJA_INVALIDA`) y no ha empezado (`409 FRANJA_PASADA`), y el socio tiene la cuota al día (`409 CUOTA_INACTIVA`).
+ 3. **Sin duplicados y con límite.** Un socio no puede estar dos veces en la lista de la misma franja (`409 YA_EN_ESPERA`) ni esperar una franja que ya tiene reservada él (`409 YA_RESERVADA`). Cada socio puede tener como mucho 2 esperas activas (`409 LIMITE_DE_ESPERAS`).
+ 4. **Posición.** La posición es el orden de llegada entre las esperas activas de esa franja, empezando por 1. `GET /api/esperas` devuelve las esperas activas de quien llama con su posición actual, y un gestor puede pedir las de otro socio con `?socio=<id>`.
+-5. **Retirarse.** `DELETE /api/esperas/:id` deja la espera en `retirada`, y los que estaban detrás suben un puesto. Solo puede hacerlo su dueño o un gestor (`403 SIN_PERMISO`). Si la espera no existe, `404 ESPERA_NO_ENCONTRADA`.
++5. **Retirarse.** `DELETE /api/esperas/:id` deja la espera en `retirada`, y los que estaban detrás suben un puesto. Solo puede hacerlo su dueño o un gestor (`403 SIN_PERMISO`). Si la espera no existe, `404 ESPERA_NO_ENCONTRADA`. Si ya no está activa o su franja ha empezado, `409 ESPERA_NO_ACTIVA`.
+ 6. **Asignación automática.** Cuando se cancela una reserva confirmada, con o sin `forzar`, la franja se asigna al primero de la lista: se crea una reserva confirmada a su nombre, con el precio de la franja y la nota `Asignada desde la lista de espera`, y su espera pasa a `asignada`. La respuesta de cancelar incluye `asignadaA` con el id de esa reserva, o `null` si no había nadie.
+ 7. **Saltar a quien ya no puede.** Si al primero de la lista no le dejarían reservar (no tiene la cuota al día o ya tiene 3 reservas futuras), su espera pasa a `descartada` y se prueba con el siguiente.
+ 8. **Caducidad.** Cuando una franja empieza, sus esperas activas caducan: no aparecen en `GET /api/esperas`, no se asignan y no cuentan para el límite de 2.
+-9. **Lo demás no cambia.** Reservar y cancelar siguen con sus reglas y sus penalizaciones. Cancelar una franja sin lista de espera responde como antes, más `asignadaA: null`.
++9. **Lo demás no cambia.** Reservar y cancelar siguen con sus reglas y sus penalizaciones. Si el socio reserva una franja en la que tiene una espera activa, esa espera pasa a `retirada` y los de detrás suben un puesto. Cancelar una franja sin lista de espera responde como antes, más `asignadaA: null`.
+ 10. **Documentación.** El `README.md` documenta la lista de espera: sus reglas, los endpoints, el campo `asignadaA` y los errores nuevos.
+ 
+ ## Plan de verificación
+diff --git a/src/nucleo.ts b/src/nucleo.ts
+index 62ed37b..e76d35d 100644
+--- a/src/nucleo.ts
++++ b/src/nucleo.ts
+@@ -1,6 +1,6 @@
+ // Las operaciones del club y sus reglas. La API HTTP (src/servidor.ts) es la única que las llama.
+ import { finDeFranja, HORAS, precio } from "./semilla.ts";
+-import type { Estado, EstadoReserva, Reserva } from "./tipos.ts";
++import type { Espera, Estado, EstadoReserva, Reserva, Socio } from "./tipos.ts";
+ 
+ export class ErrorDelClub extends Error {
+   codigo: string;
+@@ -18,6 +18,7 @@ export const LIMITE_MAXIMO = 100;
+ export const LIMITE_POR_DEFECTO = 50;
+ export const MAXIMO_RESERVAS_FUTURAS = 3;
+ export const HORAS_CANCELACION_GRATUITA = 24;
++export const MAXIMO_ESPERAS_ACTIVAS = 2;
+ 
+ function invalido(mensaje: string): never {
+   throw new ErrorDelClub("DATOS_INVALIDOS", mensaje, 400);
+@@ -55,6 +56,64 @@ export function crearClub(estado: Estado) {
+   };
+   const ocupada = (pistaId: string, inicio: string) =>
+     estado.reservas.some((r) => r.pistaId === pistaId && r.inicio === inicio && r.estado === "confirmada");
++  const futurasDe = (socioId: string) =>
++    estado.reservas.filter((r) => r.socioId === socioId && r.estado === "confirmada" && r.inicio > estado.ahora).length;
++  const tieneReservada = (socioId: string, pistaId: string, inicio: string) =>
++    estado.reservas.some((r) => r.socioId === socioId && r.pistaId === pistaId && r.inicio === inicio && r.estado === "confirmada");
++
++  // Una espera está vigente mientras sigue activa y su franja no ha empezado (si empieza, caduca).
++  const vigente = (e: Espera) => e.estado === "activa" && e.inicio > estado.ahora;
++  const listaDe = (pistaId: string, inicio: string) =>
++    estado.esperas
++      .filter((e) => vigente(e) && e.pistaId === pistaId && e.inicio === inicio)
++      .sort((a, b) => a.orden - b.orden);
++  const posicionDe = (e: Espera) => listaDe(e.pistaId, e.inicio).indexOf(e) + 1;
++  const vistaEspera = (e: Espera) => ({
++    id: e.id,
++    socioId: e.socioId,
++    pistaId: e.pistaId,
++    inicio: e.inicio,
++    estado: e.estado,
++    ...(vigente(e) ? { posicion: posicionDe(e) } : {}),
++  });
++  const espera = (id: string) => {
++    const encontrada = estado.esperas.find((e) => e.id === id);
++    if (!encontrada) throw new ErrorDelClub("ESPERA_NO_ENCONTRADA", `No existe la espera ${id}`, 404);
++    return encontrada;
++  };
++
++  // Al quedar libre una franja, se la da al primero de la lista que puede jugar. Devuelve el id de la reserva o null.
++  const asignarDesdeLaLista = (pistaId: string, inicio: string): string | null => {
++    const p = pista(pistaId);
++    if (p.estado === "cerrada") return null;
++    for (const e of listaDe(pistaId, inicio)) {
++      const socio = estado.socios.find((s) => s.id === e.socioId)!;
++      // Si ya tiene la franja reservada, su espera sobra: se retira y se sigue con el siguiente.
++      if (tieneReservada(socio.id, pistaId, inicio)) {
++        e.estado = "retirada";
++        continue;
++      }
++      if (!socio.cuotaActiva || futurasDe(socio.id) >= MAXIMO_RESERVAS_FUTURAS) {
++        e.estado = "descartada";
++        continue;
++      }
++      estado.contador += 1;
++      const nueva: Reserva = {
++        id: `R-${String(estado.contador).padStart(4, "0")}`,
++        socioId: socio.id,
++        pistaId: p.id,
++        inicio,
++        fin: finDeFranja(inicio),
++        estado: "confirmada",
++        importe: precio(p, inicio),
++        notas: "Asignada desde la lista de espera",
++      };
++      estado.reservas.push(nueva);
++      e.estado = "asignada";
++      return nueva.id;
++    }
++    return null;
++  };
+ 
+   return {
+     listarPistas() {
+@@ -141,8 +200,7 @@ export function crearClub(estado: Estado) {
+       if (p.estado === "cerrada") throw new ErrorDelClub("PISTA_CERRADA", `${p.nombre} está cerrada`);
+       if ((inicio as string) <= estado.ahora) throw new ErrorDelClub("FRANJA_PASADA", "Esa franja ya ha empezado o ha pasado");
+       if (ocupada(p.id, inicio as string)) throw new ErrorDelClub("FRANJA_NO_DISPONIBLE", "Esa franja ya está reservada");
+-      const futuras = estado.reservas.filter((r) => r.socioId === socio.id && r.estado === "confirmada" && r.inicio > estado.ahora);
+-      if (futuras.length >= MAXIMO_RESERVAS_FUTURAS) {
++      if (futurasDe(socio.id) >= MAXIMO_RESERVAS_FUTURAS) {
+         throw new ErrorDelClub("LIMITE_DE_RESERVAS", `${socio.nombre} ya tiene ${MAXIMO_RESERVAS_FUTURAS} reservas futuras`);
+       }
+       estado.contador += 1;
+@@ -157,6 +215,10 @@ export function crearClub(estado: Estado) {
+         notas: (datos.notas as string | undefined) ?? "",
+       };
+       estado.reservas.push(nueva);
++      // Si el socio estaba en la lista de esta franja, ya no la necesita: su espera se retira.
++      for (const e of estado.esperas) {
++        if (vigente(e) && e.socioId === socio.id && e.pistaId === p.id && e.inicio === nueva.inicio) e.estado = "retirada";
++      }
+       return { reserva: nueva };
+     },
+ 
+@@ -176,9 +238,68 @@ export function crearClub(estado: Estado) {
+         }
+         r.penalizacion = r.importe;
+       }
++      const eraConfirmada = r.estado === "confirmada";
+       r.estado = "cancelada";
+       if (typeof datos.motivo === "string") r.motivoCancelacion = datos.motivo;
+-      return { reserva: r };
++      const asignadaA = eraConfirmada ? asignarDesdeLaLista(r.pistaId, r.inicio) : null;
++      return { reserva: r, asignadaA };
++    },
++
++    apuntarse(quien: Socio, datos: { pistaId?: unknown; inicio?: unknown }) {
++      const { pistaId, inicio } = datos;
++      if (typeof pistaId !== "string" || typeof inicio !== "string") invalido("pistaId e inicio son obligatorios");
++      const p = pista(pistaId);
++      if (!FECHA_HORA.test(inicio) || !HORAS.includes(inicio.slice(11))) {
++        throw new ErrorDelClub("FRANJA_INVALIDA", `inicio debe ser AAAA-MM-DDTHH:MM y empezar a una de estas horas: ${HORAS.join(", ")}`, 400);
++      }
++      if (!quien.cuotaActiva) throw new ErrorDelClub("CUOTA_INACTIVA", `${quien.nombre} no tiene la cuota al día`);
++      if (p.estado === "cerrada") throw new ErrorDelClub("PISTA_CERRADA", `${p.nombre} está cerrada`);
++      if (inicio <= estado.ahora) throw new ErrorDelClub("FRANJA_PASADA", "Esa franja ya ha empezado o ha pasado");
++      if (!ocupada(p.id, inicio)) {
++        throw new ErrorDelClub("FRANJA_LIBRE", "Esa franja está libre: se puede reservar directamente");
++      }
++      if (estado.reservas.some((r) => r.socioId === quien.id && r.pistaId === p.id && r.inicio === inicio && r.estado === "confirmada")) {
++        throw new ErrorDelClub("YA_RESERVADA", "Ya tienes esa franja reservada");
++      }
++      if (estado.esperas.some((e) => vigente(e) && e.socioId === quien.id && e.pistaId === p.id && e.inicio === inicio)) {
++        throw new ErrorDelClub("YA_EN_ESPERA", "Ya estás en la lista de espera de esa franja");
++      }
++      const activas = estado.esperas.filter((e) => vigente(e) && e.socioId === quien.id).length;
++      if (activas >= MAXIMO_ESPERAS_ACTIVAS) {
++        throw new ErrorDelClub("LIMITE_DE_ESPERAS", `No puedes tener más de ${MAXIMO_ESPERAS_ACTIVAS} esperas activas`);
++      }
++      estado.contadorEsperas += 1;
++      const nueva: Espera = {
++        id: `E-${String(estado.contadorEsperas).padStart(4, "0")}`,
++        socioId: quien.id,
++        pistaId: p.id,
++        inicio,
++        estado: "activa",
++        orden: estado.contadorEsperas,
++      };
++      estado.esperas.push(nueva);
++      return { espera: vistaEspera(nueva) };
++    },
++
++    listarEsperas(quien: Socio, socioConsultado?: string) {
++      if (socioConsultado !== undefined && socioConsultado !== quien.id && quien.rol !== "gestor") {
++        throw new ErrorDelClub("SIN_PERMISO", "Solo un gestor puede consultar las esperas de otro socio", 403);
++      }
++      const socioId = socioConsultado ?? quien.id;
++      const esperas = estado.esperas
++        .filter((e) => vigente(e) && e.socioId === socioId)
++        .sort((a, b) => (a.inicio === b.inicio ? a.orden - b.orden : a.inicio.localeCompare(b.inicio)));
++      return { esperas: esperas.map(vistaEspera) };
++    },
++
++    retirarEspera(quien: Socio, id: string) {
++      const e = espera(id);
++      if (e.socioId !== quien.id && quien.rol !== "gestor") {
++        throw new ErrorDelClub("SIN_PERMISO", "Solo puedes retirar tus propias esperas", 403);
++      }
++      if (!vigente(e)) throw new ErrorDelClub("ESPERA_NO_ACTIVA", "La espera ya no está activa");
++      e.estado = "retirada";
++      return { espera: vistaEspera(e) };
+     },
+   };
+ }
+diff --git a/src/semilla.ts b/src/semilla.ts
+index bc45cc7..6332f90 100644
+--- a/src/semilla.ts
++++ b/src/semilla.ts
+@@ -158,5 +158,5 @@ export function crearSemilla(): Estado {
+   socios.push({ id: "socio-041", nombre: "Nora Benítez", email: "nora.benitez@example.com", cuotaActiva: true, rol: "socio" });
+ 
+   reservas.sort((a, b) => (a.inicio === b.inicio ? a.pistaId.localeCompare(b.pistaId) : a.inicio.localeCompare(b.inicio)));
+-  return { ahora: AHORA, pistas: PISTAS.map((p) => ({ ...p })), socios, reservas, registro: [], contador };
++  return { ahora: AHORA, pistas: PISTAS.map((p) => ({ ...p })), socios, reservas, esperas: [], registro: [], contador, contadorEsperas: 0 };
+ }
+diff --git a/src/servidor.ts b/src/servidor.ts
+index a6a7764..e0c03e0 100644
+--- a/src/servidor.ts
++++ b/src/servidor.ts
+@@ -42,15 +42,19 @@ function identificar(req: IncomingMessage): Socio | undefined {
+   return socio;
+ }
+ 
+-type Operacion = { nombre: string; argumentos: unknown; ejecutar: () => unknown };
++type Operacion = { nombre: string; argumentos: unknown; ejecutar: () => unknown; http?: number };
+ 
+-// `quien` es el socio que hace la petición (cabecera X-Socio). Las operaciones actuales no lo usan.
+-async function resolver(req: IncomingMessage, url: URL, _quien: Socio | undefined): Promise<Operacion> {
++// `quien` es el socio que hace la petición (cabecera X-Socio), si la hay.
++async function resolver(req: IncomingMessage, url: URL, quien: Socio | undefined): Promise<Operacion> {
+   const metodo = req.method ?? "GET";
+   const partes = url.pathname.split("/").filter(Boolean);
+   const q = url.searchParams;
+   if (partes[0] !== "api") throw new ErrorDelClub("RUTA_NO_ENCONTRADA", `No existe ${url.pathname}`, 404);
+   const [, recurso, id, accion] = partes;
++  const exigirQuien = (): Socio => {
++    if (!quien) throw new ErrorDelClub("NO_IDENTIFICADO", "Falta la cabecera X-Socio", 401);
++    return quien;
++  };
+ 
+   if (recurso === "pistas" && !id && metodo === "GET") {
+     return { nombre: "listarPistas", argumentos: {}, ejecutar: () => club.listarPistas() };
+@@ -82,7 +86,7 @@ async function resolver(req: IncomingMessage, url: URL, _quien: Socio | undefine
+   }
+   if (recurso === "reservas" && !id && metodo === "POST") {
+     const cuerpo = await leerCuerpo(req);
+-    return { nombre: "crearReserva", argumentos: cuerpo, ejecutar: () => club.crearReserva(cuerpo) };
++    return { nombre: "crearReserva", argumentos: cuerpo, ejecutar: () => club.crearReserva(cuerpo), http: 201 };
+   }
+   if (recurso === "reservas" && id && !accion && metodo === "GET") {
+     return { nombre: "obtenerReserva", argumentos: { reservaId: id }, ejecutar: () => club.obtenerReserva(id) };
+@@ -91,6 +95,33 @@ async function resolver(req: IncomingMessage, url: URL, _quien: Socio | undefine
+     const cuerpo = await leerCuerpo(req);
+     return { nombre: "cancelarReserva", argumentos: { reservaId: id, ...cuerpo }, ejecutar: () => club.cancelarReserva(id, cuerpo) };
+   }
++  if (recurso === "esperas" && !id && metodo === "POST") {
++    const socio = exigirQuien();
++    const cuerpo = await leerCuerpo(req);
++    return {
++      nombre: "apuntarse",
++      argumentos: { ...cuerpo, socioId: socio.id },
++      ejecutar: () => club.apuntarse(socio, cuerpo),
++      http: 201,
++    };
++  }
++  if (recurso === "esperas" && !id && metodo === "GET") {
++    const socio = exigirQuien();
++    const consultado = q.get("socio") || undefined;
++    return {
++      nombre: "listarEsperas",
++      argumentos: { socioId: socio.id, socio: consultado },
++      ejecutar: () => club.listarEsperas(socio, consultado),
++    };
++  }
++  if (recurso === "esperas" && id && !accion && metodo === "DELETE") {
++    const socio = exigirQuien();
++    return {
++      nombre: "retirarEspera",
++      argumentos: { socioId: socio.id, esperaId: id },
++      ejecutar: () => club.retirarEspera(socio, id),
++    };
++  }
+   throw new ErrorDelClub("RUTA_NO_ENCONTRADA", `No existe ${metodo} ${url.pathname}`, 404);
+ }
+ 
+@@ -131,7 +162,7 @@ const servidor = createServer(async (req, res) => {
+     operacion = await resolver(req, url, quien);
+     const resultado = operacion.ejecutar();
+     anotar(true);
+-    responder(operacion.nombre === "crearReserva" ? 201 : 200, resultado);
++    responder(operacion.http ?? 200, resultado);
+   } catch (error) {
+     if (error instanceof ErrorDelClub) {
+       anotar(false, error.codigo);
+diff --git a/src/tipos.ts b/src/tipos.ts
+index 41e5915..b6aeb28 100644
+--- a/src/tipos.ts
++++ b/src/tipos.ts
+@@ -34,6 +34,18 @@ export interface Reserva {
+   motivoCancelacion?: string;
+ }
+ 
++export type EstadoEspera = "activa" | "retirada" | "asignada" | "descartada";
++
++export interface Espera {
++  id: string;
++  socioId: string;
++  pistaId: string;
++  inicio: string;
++  estado: EstadoEspera;
++  /** Orden de llegada a la lista de su franja. La posición se calcula a partir de él. */
++  orden: number;
++}
++
+ export interface EntradaRegistro {
+   n: number;
+   operacion: string;
+@@ -47,6 +59,8 @@ export interface Estado {
+   pistas: Pista[];
+   socios: Socio[];
+   reservas: Reserva[];
++  esperas: Espera[];
+   registro: EntradaRegistro[];
+   contador: number;
++  contadorEsperas: number;
+ }
+diff --git a/test/lista-espera.test.ts b/test/lista-espera.test.ts
+new file mode 100644
+index 0000000..1f7a094
+--- /dev/null
++++ b/test/lista-espera.test.ts
+@@ -0,0 +1,323 @@
++// La lista de espera de franjas, probada a través de la API (docs/specs/lista-espera.md).
++// Las franjas de los tests son del 25 de noviembre de 2026: la semilla no tiene reservas ese día.
++import assert from "node:assert/strict";
++import { after, before, test } from "node:test";
++import { arrancarApi, type Api } from "./ayuda.ts";
++
++let api: Api;
++before(async () => {
++  api = await arrancarApi();
++});
++after(() => api.cerrar());
++
++const reservar = async (a: Api, socioId: string, pistaId: string, inicio: string): Promise<string> => {
++  const r = await a.pedir("POST", "/api/reservas", { cuerpo: { socioId, pistaId, inicio } });
++  assert.equal(r.status, 201, r.texto);
++  return r.cuerpo.reserva.id;
++};
++const apuntar = (a: Api, socio: string, pistaId: string, inicio: string) =>
++  a.pedir("POST", "/api/esperas", { socio, cuerpo: { pistaId, inicio } });
++const cancelar = (a: Api, reservaId: string, cuerpo?: unknown) =>
++  a.pedir("POST", `/api/reservas/${reservaId}/cancelar`, { cuerpo });
++const esperasDe = async (a: Api, socio: string, consultado?: string): Promise<any[]> => {
++  const ruta = consultado ? `/api/esperas?socio=${consultado}` : "/api/esperas";
++  const r = await a.pedir("GET", ruta, { socio });
++  assert.equal(r.status, 200, r.texto);
++  return r.cuerpo.esperas;
++};
++const estadoDeEspera = async (a: Api, id: string): Promise<string> => {
++  const estado = (await a.pedir("GET", "/_estado")).cuerpo;
++  return estado.esperas.find((e: { id: string }) => e.id === id).estado;
++};
++
++test("apuntarse solo en franjas ocupadas, con las comprobaciones de reservar", async () => {
++  await reservar(api, "socio-030", "pista-1", "2026-11-25T19:30");
++
++  const sinCabecera = await api.pedir("POST", "/api/esperas", { cuerpo: { pistaId: "pista-1", inicio: "2026-11-25T19:30" } });
++  assert.equal(sinCabecera.status, 401);
++  assert.equal(sinCabecera.cuerpo.error.codigo, "NO_IDENTIFICADO");
++
++  const alta = await apuntar(api, "socio-003", "pista-1", "2026-11-25T19:30");
++  assert.equal(alta.status, 201);
++  assert.equal(alta.cuerpo.espera.estado, "activa");
++  assert.equal(alta.cuerpo.espera.posicion, 1);
++  assert.equal(alta.cuerpo.espera.socioId, "socio-003");
++  assert.equal(alta.cuerpo.espera.pistaId, "pista-1");
++  assert.equal(alta.cuerpo.espera.inicio, "2026-11-25T19:30");
++
++  const rechazos: [string, string, string, number, string][] = [
++    ["socio-003", "pista-1", "2026-11-25T19:30", 409, "YA_EN_ESPERA"],
++    ["socio-030", "pista-1", "2026-11-25T19:30", 409, "YA_RESERVADA"],
++    ["socio-011", "pista-1", "2026-11-25T19:30", 409, "CUOTA_INACTIVA"],
++    ["socio-003", "pista-9", "2026-11-25T19:30", 404, "PISTA_NO_ENCONTRADA"],
++    ["socio-003", "pista-4", "2026-11-25T19:30", 409, "PISTA_CERRADA"],
++    ["socio-003", "pista-1", "2026-11-25T11:00", 400, "FRANJA_INVALIDA"],
++    ["socio-003", "pista-1", "2026-11-18T09:00", 409, "FRANJA_PASADA"],
++    ["socio-003", "pista-2", "2026-11-25T19:30", 409, "FRANJA_LIBRE"],
++  ];
++  for (const [socio, pista, inicio, status, codigo] of rechazos) {
++    const r = await apuntar(api, socio, pista, inicio);
++    assert.equal(r.status, status, `${socio} ${pista} ${inicio}`);
++    assert.equal(r.cuerpo.error.codigo, codigo, `${socio} ${pista} ${inicio}`);
++  }
++});
++
++test("como mucho dos esperas activas por socio", async () => {
++  await reservar(api, "socio-031", "pista-2", "2026-11-25T19:30");
++  await reservar(api, "socio-032", "pista-3", "2026-11-25T19:30");
++  await reservar(api, "socio-034", "pista-1", "2026-11-25T21:00");
++  assert.equal((await apuntar(api, "socio-006", "pista-2", "2026-11-25T19:30")).status, 201);
++  assert.equal((await apuntar(api, "socio-006", "pista-3", "2026-11-25T19:30")).status, 201);
++  const tercera = await apuntar(api, "socio-006", "pista-1", "2026-11-25T21:00");
++  assert.equal(tercera.status, 409);
++  assert.equal(tercera.cuerpo.error.codigo, "LIMITE_DE_ESPERAS");
++});
++
++test("la posición es el orden de llegada y se recalcula al retirarse alguien", async () => {
++  await reservar(api, "socio-035", "pista-3", "2026-11-25T15:00");
++  const uno = await apuntar(api, "socio-001", "pista-3", "2026-11-25T15:00");
++  const dos = await apuntar(api, "socio-002", "pista-3", "2026-11-25T15:00");
++  const tres = await apuntar(api, "socio-004", "pista-3", "2026-11-25T15:00");
++  assert.deepEqual([uno.cuerpo.espera.posicion, dos.cuerpo.espera.posicion, tres.cuerpo.espera.posicion], [1, 2, 3]);
++
++  const mirarLista = await esperasDe(api, "socio-004");
++  assert.equal(mirarLista[0].posicion, 3);
++
++  // Sin permiso: un socio no ve ni retira las esperas de otro.
++  const ajena = await api.pedir("GET", "/api/esperas?socio=socio-001", { socio: "socio-002" });
++  assert.equal(ajena.status, 403);
++  assert.equal(ajena.cuerpo.error.codigo, "SIN_PERMISO");
++  const retiradaAjena = await api.pedir("DELETE", `/api/esperas/${uno.cuerpo.espera.id}`, { socio: "socio-002" });
++  assert.equal(retiradaAjena.status, 403);
++  assert.equal(retiradaAjena.cuerpo.error.codigo, "SIN_PERMISO");
++
++  // Retirarse: queda como retirada y los de detrás suben.
++  const retirada = await api.pedir("DELETE", `/api/esperas/${uno.cuerpo.espera.id}`, { socio: "socio-001" });
++  assert.equal(retirada.status, 200);
++  assert.equal(retirada.cuerpo.espera.estado, "retirada");
++  assert.equal(retirada.cuerpo.espera.posicion, undefined);
++  assert.deepEqual(await esperasDe(api, "socio-001"), []);
++  assert.equal((await esperasDe(api, "socio-002"))[0].posicion, 1);
++  assert.equal((await esperasDe(api, "socio-004"))[0].posicion, 2);
++
++  // Un ?socio= vacío equivale a no pedir a nadie: un socio ve las suyas, no recibe 403.
++  const vacio = await api.pedir("GET", "/api/esperas?socio=", { socio: "socio-004" });
++  assert.equal(vacio.status, 200);
++  assert.equal(vacio.cuerpo.esperas[0].posicion, 2);
++
++  // Un gestor puede consultar y retirar las de cualquiera.
++  assert.equal((await esperasDe(api, "socio-040", "socio-004"))[0].posicion, 2);
++  const retiradaGestor = await api.pedir("DELETE", `/api/esperas/${dos.cuerpo.espera.id}`, { socio: "socio-040" });
++  assert.equal(retiradaGestor.status, 200);
++  assert.equal((await esperasDe(api, "socio-004"))[0].posicion, 1);
++
++  const otraVez = await api.pedir("DELETE", `/api/esperas/${uno.cuerpo.espera.id}`, { socio: "socio-001" });
++  assert.equal(otraVez.status, 409);
++  assert.equal(otraVez.cuerpo.error.codigo, "ESPERA_NO_ACTIVA");
++  const inexistente = await api.pedir("DELETE", "/api/esperas/E-9999", { socio: "socio-001" });
++  assert.equal(inexistente.status, 404);
++  assert.equal(inexistente.cuerpo.error.codigo, "ESPERA_NO_ENCONTRADA");
++
++  const sinCabeceraLista = await api.pedir("GET", "/api/esperas");
++  assert.equal(sinCabeceraLista.status, 401);
++  const sinCabeceraBorrar = await api.pedir("DELETE", `/api/esperas/${tres.cuerpo.espera.id}`);
++  assert.equal(sinCabeceraBorrar.status, 401);
++  assert.equal(sinCabeceraBorrar.cuerpo.error.codigo, "NO_IDENTIFICADO");
++});
++
++test("al cancelar, la franja pasa al primero de la lista y la respuesta dice a quién", async () => {
++  const reserva = await reservar(api, "socio-036", "pista-2", "2026-11-25T16:30");
++  const primero = await apuntar(api, "socio-005", "pista-2", "2026-11-25T16:30");
++  const segundo = await apuntar(api, "socio-007", "pista-2", "2026-11-25T16:30");
++  assert.equal(primero.status, 201);
++  assert.equal(segundo.status, 201);
++
++  const cancelada = await cancelar(api, reserva);
++  assert.equal(cancelada.status, 200);
++  assert.equal(cancelada.cuerpo.reserva.estado, "cancelada");
++  const nueva = cancelada.cuerpo.asignadaA;
++  assert.equal(typeof nueva, "string");
++
++  const asignada = (await api.pedir("GET", `/api/reservas/${nueva}`)).cuerpo.reserva;
++  assert.equal(asignada.socioId, "socio-005");
++  assert.equal(asignada.estado, "confirmada");
++  assert.equal(asignada.inicio, "2026-11-25T16:30");
++  assert.equal(asignada.importe, 1800);
++  assert.equal(asignada.notas, "Asignada desde la lista de espera");
++  assert.equal(await estadoDeEspera(api, primero.cuerpo.espera.id), "asignada");
++  assert.deepEqual(await esperasDe(api, "socio-005"), []);
++  assert.equal((await esperasDe(api, "socio-007"))[0].posicion, 1);
++
++  const sinLista = await reservar(api, "socio-037", "pista-3", "2026-11-25T13:30");
++  const sinNadie = await cancelar(api, sinLista);
++  assert.equal(sinNadie.status, 200);
++  assert.equal(sinNadie.cuerpo.asignadaA, null);
++});
++
++test("si al primero no le dejan reservar, su espera pasa a descartada y se prueba el siguiente", async () => {
++  const reserva = await reservar(api, "socio-038", "pista-1", "2026-11-25T10:30");
++  const nora = await apuntar(api, "socio-041", "pista-1", "2026-11-25T10:30");
++  const otro = await apuntar(api, "socio-010", "pista-1", "2026-11-25T10:30");
++  assert.equal(nora.status, 201);
++  assert.equal(otro.status, 201);
++
++  // Nora llena sus tres reservas futuras después de apuntarse.
++  await reservar(api, "socio-041", "pista-1", "2026-11-26T09:00");
++  await reservar(api, "socio-041", "pista-2", "2026-11-26T09:00");
++  await reservar(api, "socio-041", "pista-3", "2026-11-26T09:00");
++
++  const cancelada = await cancelar(api, reserva);
++  const asignada = (await api.pedir("GET", `/api/reservas/${cancelada.cuerpo.asignadaA}`)).cuerpo.reserva;
++  assert.equal(asignada.socioId, "socio-010");
++  assert.equal(await estadoDeEspera(api, nora.cuerpo.espera.id), "descartada");
++  assert.equal(await estadoDeEspera(api, otro.cuerpo.espera.id), "asignada");
++  assert.deepEqual(await esperasDe(api, "socio-041"), []);
++});
++
++test("cancelar cuando la pista está cerrada no asigna la franja y la lista se conserva", async () => {
++  const reserva = await reservar(api, "socio-012", "pista-2", "2026-11-25T12:00");
++  const espera = await apuntar(api, "socio-013", "pista-2", "2026-11-25T12:00");
++  assert.equal(espera.status, 201);
++
++  const cerrar = await api.pedir("PATCH", "/api/pistas/pista-2", { cuerpo: { estado: "cerrada" } });
++  assert.equal(cerrar.status, 200);
++  const cancelada = await cancelar(api, reserva);
++  assert.equal(cancelada.cuerpo.asignadaA, null);
++  assert.equal((await esperasDe(api, "socio-013"))[0].posicion, 1);
++
++  await api.pedir("PATCH", "/api/pistas/pista-2", { cuerpo: { estado: "operativa" } });
++});
++
++test("cancelar fuera de plazo con forzar también asigna la franja", async () => {
++  const forzado = await arrancarApi({ AHORA: "2026-11-25T10:00" });
++  try {
++    const reserva = await reservar(forzado, "socio-039", "pista-2", "2026-11-25T19:30");
++    const espera = await apuntar(forzado, "socio-016", "pista-2", "2026-11-25T19:30");
++    assert.equal(espera.status, 201);
++
++    // Faltan 9,5 horas: sin forzar no se puede cancelar.
++    const sinForzar = await cancelar(forzado, reserva);
++    assert.equal(sinForzar.status, 409);
++    assert.equal(sinForzar.cuerpo.error.codigo, "FUERA_DE_PLAZO");
++    assert.equal((await esperasDe(forzado, "socio-016"))[0].posicion, 1);
++
++    const conForzar = await cancelar(forzado, reserva, { forzar: true });
++    assert.equal(conForzar.status, 200);
++    assert.equal(conForzar.cuerpo.reserva.penalizacion, 2800);
++    const asignada = (await forzado.pedir("GET", `/api/reservas/${conForzar.cuerpo.asignadaA}`)).cuerpo.reserva;
++    assert.equal(asignada.socioId, "socio-016");
++    assert.equal(asignada.importe, 2800);
++  } finally {
++    forzado.cerrar();
++  }
++});
++
++test("una franja que empieza caduca su lista: no cuenta para el límite ni aparece", async () => {
++  const caducidad = await arrancarApi();
++  try {
++    await reservar(caducidad, "socio-030", "pista-1", "2026-11-25T19:30");
++    await reservar(caducidad, "socio-031", "pista-1", "2026-11-25T21:00");
++    await reservar(caducidad, "socio-032", "pista-2", "2026-11-25T21:00");
++    const primera = await apuntar(caducidad, "socio-003", "pista-1", "2026-11-25T19:30");
++    const segunda = await apuntar(caducidad, "socio-003", "pista-1", "2026-11-25T21:00");
++    assert.equal(primera.status, 201);
++    assert.equal(segunda.status, 201);
++
++    assert.equal((await caducidad.pedir("POST", "/_reloj", { cuerpo: { ahora: "2026-11-25T19:30" } })).status, 200);
++
++    const vigentes = await esperasDe(caducidad, "socio-003");
++    assert.deepEqual(vigentes.map((e) => e.inicio), ["2026-11-25T21:00"]);
++    assert.equal(vigentes[0].posicion, 1);
++
++    // La caducada ya no cuenta: el socio sigue pudiendo apuntarse a otra franja.
++    const otra = await apuntar(caducidad, "socio-003", "pista-2", "2026-11-25T21:00");
++    assert.equal(otra.status, 201);
++    assert.equal(otra.cuerpo.espera.posicion, 1);
++
++    const retirarCaducada = await caducidad.pedir("DELETE", `/api/esperas/${primera.cuerpo.espera.id}`, { socio: "socio-003" });
++    assert.equal(retirarCaducada.status, 409);
++    assert.equal(retirarCaducada.cuerpo.error.codigo, "ESPERA_NO_ACTIVA");
++    const tarde = await apuntar(caducidad, "socio-004", "pista-1", "2026-11-25T19:30");
++    assert.equal(tarde.status, 409);
++    assert.equal(tarde.cuerpo.error.codigo, "FRANJA_PASADA");
++  } finally {
++    caducidad.cerrar();
++  }
++});
++
++test("una espera caducada no se asigna al cancelar la reserva de su franja, que ya ha empezado", async () => {
++  const caducada = await arrancarApi();
++  try {
++    const ocupante = await reservar(caducada, "socio-012", "pista-3", "2026-11-25T18:00");
++    const espera = await apuntar(caducada, "socio-003", "pista-3", "2026-11-25T18:00");
++    assert.equal(espera.status, 201);
++
++    assert.equal((await caducada.pedir("POST", "/_reloj", { cuerpo: { ahora: "2026-11-25T18:00" } })).status, 200);
++
++    // La franja ya ha empezado: cancelar da RESERVA_PASADA y no se asigna nada a la espera caducada.
++    const cancelacion = await cancelar(caducada, ocupante, { forzar: true });
++    assert.equal(cancelacion.status, 409);
++    assert.equal(cancelacion.cuerpo.error.codigo, "RESERVA_PASADA");
++    assert.notEqual(await estadoDeEspera(caducada, espera.cuerpo.espera.id), "asignada");
++    assert.deepEqual(await esperasDe(caducada, "socio-003"), []);
++  } finally {
++    caducada.cerrar();
++  }
++});
++
++test("si el socio reserva después la franja en la que espera, su espera se retira y la franja no vuelve a él", async () => {
++  const a = await arrancarApi();
++  try {
++    const ocupante = await reservar(a, "socio-012", "pista-2", "2026-11-25T12:00");
++    const primero = await apuntar(a, "socio-003", "pista-2", "2026-11-25T12:00");
++    const segundo = await apuntar(a, "socio-013", "pista-2", "2026-11-25T12:00");
++    assert.equal(primero.cuerpo.espera.posicion, 1);
++    assert.equal(segundo.cuerpo.espera.posicion, 2);
++
++    // Con la pista cerrada, cancelar deja la franja libre y sin asignar; socio-003 sigue en la lista.
++    assert.equal((await a.pedir("PATCH", "/api/pistas/pista-2", { cuerpo: { estado: "cerrada" } })).status, 200);
++    const cancelada = await cancelar(a, ocupante);
++    assert.equal(cancelada.status, 200);
++    assert.equal(cancelada.cuerpo.asignadaA, null);
++    assert.equal((await esperasDe(a, "socio-003"))[0].posicion, 1);
++    assert.equal((await a.pedir("PATCH", "/api/pistas/pista-2", { cuerpo: { estado: "operativa" } })).status, 200);
++
++    // socio-003 reserva la franja directamente: su espera deja de contar y ya no aparece.
++    const directa = await a.pedir("POST", "/api/reservas", {
++      cuerpo: { socioId: "socio-003", pistaId: "pista-2", inicio: "2026-11-25T12:00" },
++    });
++    assert.equal(directa.status, 201);
++    assert.deepEqual(await esperasDe(a, "socio-003"), []);
++    assert.equal(await estadoDeEspera(a, primero.cuerpo.espera.id), "retirada");
++    assert.equal((await esperasDe(a, "socio-013"))[0].posicion, 1);
++
++    // Al cancelar esa reserva, la franja pasa a socio-013 y no a socio-003.
++    const devuelta = await cancelar(a, directa.cuerpo.reserva.id);
++    assert.equal(devuelta.status, 200);
++    const nueva = (await a.pedir("GET", `/api/reservas/${devuelta.cuerpo.asignadaA}`)).cuerpo.reserva;
++    assert.equal(nueva.socioId, "socio-013");
++    assert.equal(nueva.notas, "Asignada desde la lista de espera");
++  } finally {
++    a.cerrar();
++  }
++});
++
++test("el registro guarda como socioId a quien hace la petición, no el que viene en el cuerpo", async () => {
++  const a = await arrancarApi();
++  try {
++    await reservar(a, "socio-030", "pista-1", "2026-11-25T19:30");
++    const alta = await a.pedir("POST", "/api/esperas", {
++      socio: "socio-003",
++      cuerpo: { pistaId: "pista-1", inicio: "2026-11-25T19:30", socioId: "socio-999" },
++    });
++    assert.equal(alta.status, 201);
++    assert.equal(alta.cuerpo.espera.socioId, "socio-003");
++
++    const registro = (await a.pedir("GET", "/_estado")).cuerpo.registro;
++    const ultima = registro[registro.length - 1];
++    assert.equal(ultima.operacion, "apuntarse");
++    assert.equal(ultima.argumentos.socioId, "socio-003");
++  } finally {
++    a.cerrar();
++  }
++});

@@ -1,0 +1,179 @@
+diff --git a/README.md b/README.md
+index 256e5c2..8752395 100644
+--- a/README.md
++++ b/README.md
+@@ -24,7 +24,8 @@ En el club siempre es miércoles 18 de noviembre de 2026 a las 10:00, salvo que
+ - Para reservar hay que tener la cuota al día (`cuotaActiva`).
+ - Cada socio puede tener como máximo 3 reservas futuras confirmadas.
+ - No se reservan pistas cerradas ni franjas que ya han empezado.
+-- Cancelar es gratis hasta 24 horas antes. Después, solo con `forzar: true`, y se cobra una penalización del 100 % del importe.
++- Cancelar es gratis hasta 24 horas antes. Después, solo con `forzar: true`, y se cobra una penalización del 100 % del importe pagado (después del descuento, si lo hubo).
++- Al reservar se puede usar un código: `BIENVENIDA` descuenta el 50 % en la primera reserva hasta el 31 de diciembre de 2026; `MANANAS` descuenta 4,00 € de lunes a viernes en franjas que empiezan antes de las 12:00; `CLUB10` descuenta el 10 % en cualquier franja, hasta tres reservas activas o no presentadas por socio. Los códigos no distinguen mayúsculas y aceptan espacios alrededor; no se acumulan.
+ 
+ ## API
+ 
+@@ -45,10 +46,10 @@ En el club siempre es miércoles 18 de noviembre de 2026 a las 10:00, salvo que
+ 
+ - `GET /api/reservas`: lista reservas con filtros opcionales `fecha`, `desde`, `hasta` (por día de inicio, ambos incluidos), `socio`, `pista` y `estado` (`confirmada`, `cancelada` o `no_presentada`), paginada con `limite` (1 a 100, 50 por defecto) y `pagina`. Responde `{ total, pagina, paginas, reservas }`.
+ - `GET /api/reservas/:id`: una reserva. Responde `{ reserva }`.
+-- `POST /api/reservas` con `{ socioId, pistaId, inicio, notas? }`: crea una reserva. Responde `201 { reserva }`. Errores: `SOCIO_NO_ENCONTRADO`, `PISTA_NO_ENCONTRADA`, `FRANJA_INVALIDA`, `CUOTA_INACTIVA`, `PISTA_CERRADA`, `FRANJA_PASADA`, `FRANJA_NO_DISPONIBLE` y `LIMITE_DE_RESERVAS`.
++- `POST /api/reservas` con `{ socioId, pistaId, inicio, notas?, codigo? }`: crea una reserva. `codigo` es un código del catálogo anterior. Responde `201 { reserva }`. Errores: `SOCIO_NO_ENCONTRADO`, `PISTA_NO_ENCONTRADA`, `FRANJA_INVALIDA`, `CUOTA_INACTIVA`, `PISTA_CERRADA`, `FRANJA_PASADA`, `FRANJA_NO_DISPONIBLE`, `LIMITE_DE_RESERVAS`, `CODIGO_INVALIDO` (400), `CODIGO_NO_APLICABLE` (409) y `DATOS_INVALIDOS` (si `codigo` no es texto).
+ - `POST /api/reservas/:id/cancelar` con `{ forzar?, motivo? }`: cancela una reserva. Responde `{ reserva }`. Errores: `RESERVA_NO_ENCONTRADA`, `YA_CANCELADA`, `RESERVA_PASADA` y `FUERA_DE_PLAZO`.
+ 
+-Una reserva tiene `id`, `socioId`, `pistaId`, `inicio`, `fin`, `estado`, `importe`, `notas` y, si se canceló, `penalizacion` y `motivoCancelacion`.
++Una reserva tiene `id`, `socioId`, `pistaId`, `inicio`, `fin`, `estado`, `importeBase` (precio original), `descuento`, `importe` (importe pagado), `notas` y `codigo` si se usó. Si se canceló, puede tener `penalizacion` y `motivoCancelacion`. Listados y detalle devuelven estos campos; disponibilidad sigue mostrando el precio original.
+ 
+ ### Solo para pruebas
+ 
+diff --git a/src/nucleo.ts b/src/nucleo.ts
+index 62ed37b..5a72bcd 100644
+--- a/src/nucleo.ts
++++ b/src/nucleo.ts
+@@ -125,12 +125,13 @@ export function crearClub(estado: Estado) {
+       return { reserva: reserva(id) };
+     },
+ 
+-    crearReserva(datos: { socioId?: unknown; pistaId?: unknown; inicio?: unknown; notas?: unknown }) {
++    crearReserva(datos: { socioId?: unknown; pistaId?: unknown; inicio?: unknown; notas?: unknown; codigo?: unknown }) {
+       const { socioId, pistaId, inicio } = datos;
+       if (typeof socioId !== "string" || typeof pistaId !== "string" || typeof inicio !== "string") {
+         invalido("socioId, pistaId e inicio son obligatorios");
+       }
+       if (datos.notas !== undefined && typeof datos.notas !== "string") invalido("notas debe ser un texto");
++      if (datos.codigo !== undefined && typeof datos.codigo !== "string") invalido("codigo debe ser un texto");
+       const socio = estado.socios.find((s) => s.id === socioId);
+       if (!socio) throw new ErrorDelClub("SOCIO_NO_ENCONTRADO", `No existe el socio ${socioId}`, 404);
+       const p = pista(pistaId as string);
+@@ -145,6 +146,30 @@ export function crearClub(estado: Estado) {
+       if (futuras.length >= MAXIMO_RESERVAS_FUTURAS) {
+         throw new ErrorDelClub("LIMITE_DE_RESERVAS", `${socio.nombre} ya tiene ${MAXIMO_RESERVAS_FUTURAS} reservas futuras`);
+       }
++      const codigo = typeof datos.codigo === "string" ? datos.codigo.trim().toUpperCase() : undefined;
++      if (codigo && !["BIENVENIDA", "MANANAS", "CLUB10"].includes(codigo)) {
++        throw new ErrorDelClub("CODIGO_INVALIDO", `No existe el código ${codigo}`, 400);
++      }
++      let descuento = 0;
++      if (codigo === "BIENVENIDA") {
++        if (estado.reservas.some((r) => r.socioId === socio.id) || estado.ahora.slice(0, 10) > "2026-12-31") {
++          throw new ErrorDelClub("CODIGO_NO_APLICABLE", "BIENVENIDA solo se aplica a la primera reserva y hasta el 31 de diciembre de 2026");
++        }
++        descuento = Math.floor(precio(p, inicio as string) / 2);
++      } else if (codigo === "MANANAS") {
++        const fecha = new Date(`${(inicio as string).slice(0, 10)}T00:00:00Z`);
++        const dia = fecha.getUTCDay();
++        if (dia === 0 || dia === 6 || (inicio as string).slice(11) >= "12:00") {
++          throw new ErrorDelClub("CODIGO_NO_APLICABLE", "MANANAS solo se aplica de lunes a viernes antes de las 12:00");
++        }
++        descuento = 400;
++      } else if (codigo === "CLUB10") {
++        const usos = estado.reservas.filter((r) => r.socioId === socio.id && r.codigo === "CLUB10" && r.estado !== "cancelada").length;
++        if (usos >= 3) throw new ErrorDelClub("CODIGO_NO_APLICABLE", "CLUB10 ya se ha usado en tres reservas");
++        descuento = Math.floor(precio(p, inicio as string) / 10);
++      }
++      const importeBase = precio(p, inicio as string);
++      descuento = Math.min(descuento, importeBase);
+       estado.contador += 1;
+       const nueva: Reserva = {
+         id: `R-${String(estado.contador).padStart(4, "0")}`,
+@@ -153,7 +178,10 @@ export function crearClub(estado: Estado) {
+         inicio: inicio as string,
+         fin: finDeFranja(inicio as string),
+         estado: "confirmada",
+-        importe: precio(p, inicio as string),
++        importeBase,
++        descuento,
++        importe: importeBase - descuento,
++        ...(codigo ? { codigo } : {}),
+         notas: (datos.notas as string | undefined) ?? "",
+       };
+       estado.reservas.push(nueva);
+diff --git a/src/semilla.ts b/src/semilla.ts
+index bc45cc7..b30c503 100644
+--- a/src/semilla.ts
++++ b/src/semilla.ts
+@@ -91,6 +91,8 @@ export function crearSemilla(): Estado {
+       inicio,
+       fin: finDeFranja(inicio),
+       estado,
++      importeBase: precio(pista, inicio),
++      descuento: 0,
+       importe: precio(pista, inicio),
+       notas,
+     });
+diff --git a/src/tipos.ts b/src/tipos.ts
+index 41e5915..54ebeb8 100644
+--- a/src/tipos.ts
++++ b/src/tipos.ts
+@@ -26,8 +26,13 @@ export interface Reserva {
+   inicio: string;
+   fin: string;
+   estado: EstadoReserva;
+-  /** Céntimos de euro. */
++  /** Céntimos de euro antes de aplicar el código. */
++  importeBase: number;
++  /** Céntimos de euro descontados. */
++  descuento: number;
++  /** Céntimos de euro pagados. */
+   importe: number;
++  codigo?: string;
+   notas: string;
+   /** Céntimos cobrados al cancelar fuera de plazo. */
+   penalizacion?: number;
+diff --git a/test/club.test.ts b/test/club.test.ts
+index 5dc8821..6713c83 100644
+--- a/test/club.test.ts
++++ b/test/club.test.ts
+@@ -37,6 +37,53 @@ test("reservar sigue las reglas del club", async () => {
+   assert.equal(pasada.cuerpo.error.codigo, "FRANJA_PASADA");
+ });
+ 
++test("los códigos aplican descuentos, normalizan su formato y se exponen en reservas", async () => {
++  const bienvenida = await api.pedir("POST", "/api/reservas", { cuerpo: { socioId: "socio-041", pistaId: "pista-3", inicio: "2026-11-19T12:00", codigo: "  bienvenida " } });
++  assert.equal(bienvenida.status, 201);
++  assert.deepEqual([bienvenida.cuerpo.reserva.importeBase, bienvenida.cuerpo.reserva.descuento, bienvenida.cuerpo.reserva.importe, bienvenida.cuerpo.reserva.codigo], [1200, 600, 600, "BIENVENIDA"]);
++  const listada = await api.pedir("GET", "/api/reservas?socio=socio-041");
++  assert.equal(listada.cuerpo.reservas[0].codigo, "BIENVENIDA");
++  const mananas = await api.pedir("POST", "/api/reservas", { cuerpo: { socioId: "socio-042", pistaId: "pista-1", inicio: "2026-11-19T13:30", codigo: "MANANAS" } });
++  assert.equal(mananas.cuerpo.reserva.descuento, 400);
++  const club10 = await api.pedir("POST", "/api/reservas", { cuerpo: { socioId: "socio-043", pistaId: "pista-2", inicio: "2026-11-21T18:00", codigo: "club10" } });
++  assert.deepEqual([club10.cuerpo.reserva.importeBase, club10.cuerpo.reserva.descuento, club10.cuerpo.reserva.importe], [2800, 280, 2520]);
++  const sinCodigo = await api.pedir("POST", "/api/reservas", { cuerpo: { socioId: "socio-044", pistaId: "pista-2", inicio: "2026-11-21T18:00" } });
++  assert.deepEqual([sinCodigo.cuerpo.reserva.importeBase, sinCodigo.cuerpo.reserva.descuento, sinCodigo.cuerpo.reserva.importe, sinCodigo.cuerpo.reserva.codigo], [2800, 0, 2800, undefined]);
++  const disponibilidad = await api.pedir("GET", "/api/disponibilidad?fecha=2026-11-19&pista=pista-1");
++  assert.equal(disponibilidad.cuerpo.pistas[0].franjas[0].precio, 1200);
++});
++
++test("condiciones y formato de los códigos producen los errores documentados", async () => {
++  const yaReservo = await api.pedir("POST", "/api/reservas", { cuerpo: { socioId: "socio-004", pistaId: "pista-3", inicio: "2026-11-24T12:00", codigo: "BIENVENIDA" } });
++  assert.equal(yaReservo.cuerpo.error.codigo, "CODIGO_NO_APLICABLE");
++  const tarde = await api.pedir("POST", "/api/reservas", { cuerpo: { socioId: "socio-005", pistaId: "pista-3", inicio: "2026-11-21T16:30", codigo: "MANANAS" } });
++  assert.equal(tarde.cuerpo.error.codigo, "CODIGO_NO_APLICABLE");
++  assert.equal((await api.pedir("POST", "/api/reservas", { cuerpo: { socioId: "socio-005", pistaId: "pista-3", inicio: "2026-11-24T12:00", codigo: "desconocido" } })).cuerpo.error.codigo, "CODIGO_INVALIDO");
++  assert.equal((await api.pedir("POST", "/api/reservas", { cuerpo: { socioId: "socio-005", pistaId: "pista-3", inicio: "2026-11-24T12:00", codigo: 10 } })).cuerpo.error.codigo, "DATOS_INVALIDOS");
++});
++
++test("la penalización cobra el importe descontado y las canceladas no consumen CLUB10", async () => {
++  const otra = await arrancarApi();
++  try {
++  const creada = await otra.pedir("POST", "/api/reservas", { cuerpo: { socioId: "socio-006", pistaId: "pista-3", inicio: "2026-11-19T09:00", codigo: "MANANAS" } });
++  await otra.pedir("POST", "/_reloj", { cuerpo: { ahora: "2026-11-19T09:00" } });
++  const cancelada = await otra.pedir("POST", `/api/reservas/${creada.cuerpo.reserva.id}/cancelar`, { cuerpo: { forzar: true } });
++  assert.equal(cancelada.cuerpo.reserva.penalizacion, 800);
++  } finally {
++    otra.cerrar();
++  }
++  const club10s = [];
++  for (const inicio of ["2026-11-20T09:00", "2026-11-20T10:30", "2026-11-20T12:00"]) {
++    club10s.push(await api.pedir("POST", "/api/reservas", { cuerpo: { socioId: "socio-007", pistaId: "pista-1", inicio, codigo: "CLUB10" } }));
++  }
++  assert.equal(club10s[2].status, 201);
++  await api.pedir("POST", `/api/reservas/${club10s[0].cuerpo.reserva.id}/cancelar`);
++  const cuarta = await api.pedir("POST", "/api/reservas", { cuerpo: { socioId: "socio-007", pistaId: "pista-1", inicio: "2026-11-20T13:30", codigo: "CLUB10" } });
++  assert.equal(cuarta.status, 201);
++  const quinta = await api.pedir("POST", "/api/reservas", { cuerpo: { socioId: "socio-007", pistaId: "pista-1", inicio: "2026-11-20T15:00", codigo: "CLUB10" } });
++  assert.equal(quinta.cuerpo.error.codigo, "CODIGO_NO_APLICABLE");
++});
++
+ test("cancelar: gratis hasta 24 horas antes y, después, solo con forzar y penalización", async () => {
+   const fuera = await api.pedir("POST", "/api/reservas/R-0520/cancelar");
+   assert.equal(fuera.status, 409);

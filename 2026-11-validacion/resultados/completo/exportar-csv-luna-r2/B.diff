@@ -1,0 +1,123 @@
+diff --git a/README.md b/README.md
+index 256e5c2..ac9aaff 100644
+--- a/README.md
++++ b/README.md
+@@ -44,6 +44,7 @@ En el club siempre es miércoles 18 de noviembre de 2026 a las 10:00, salvo que
+ ### Reservas
+ 
+ - `GET /api/reservas`: lista reservas con filtros opcionales `fecha`, `desde`, `hasta` (por día de inicio, ambos incluidos), `socio`, `pista` y `estado` (`confirmada`, `cancelada` o `no_presentada`), paginada con `limite` (1 a 100, 50 por defecto) y `pagina`. Responde `{ total, pagina, paginas, reservas }`.
++- `GET /api/reservas/exportar?desde=AAAA-MM-DD&hasta=AAAA-MM-DD[&estado=<estado>]`: exporta a CSV reservas cuyo inicio cae en el periodo (ambos días incluidos), opcionalmente filtradas por estado. Solo gestores, identificados con `X-Socio`. Responde `text/csv; charset=utf-8` como adjunto `reservas-<desde>-<hasta>.csv`, con importes en euros y columnas `id,fecha,hora,pista,socio,email,estado,importe,penalizacion,notas`. Errores: `401 NO_IDENTIFICADO`, `403 SIN_PERMISO`, `400 DATOS_INVALIDOS` (fechas, periodo u estado) y `400 RANGO_DEMASIADO_GRANDE` (más de 92 días).
+ - `GET /api/reservas/:id`: una reserva. Responde `{ reserva }`.
+ - `POST /api/reservas` con `{ socioId, pistaId, inicio, notas? }`: crea una reserva. Responde `201 { reserva }`. Errores: `SOCIO_NO_ENCONTRADO`, `PISTA_NO_ENCONTRADA`, `FRANJA_INVALIDA`, `CUOTA_INACTIVA`, `PISTA_CERRADA`, `FRANJA_PASADA`, `FRANJA_NO_DISPONIBLE` y `LIMITE_DE_RESERVAS`.
+ - `POST /api/reservas/:id/cancelar` con `{ forzar?, motivo? }`: cancela una reserva. Responde `{ reserva }`. Errores: `RESERVA_NO_ENCONTRADA`, `YA_CANCELADA`, `RESERVA_PASADA` y `FUERA_DE_PLAZO`.
+diff --git a/src/servidor.ts b/src/servidor.ts
+index a6a7764..da17abf 100644
+--- a/src/servidor.ts
++++ b/src/servidor.ts
+@@ -45,7 +45,7 @@ function identificar(req: IncomingMessage): Socio | undefined {
+ type Operacion = { nombre: string; argumentos: unknown; ejecutar: () => unknown };
+ 
+ // `quien` es el socio que hace la petición (cabecera X-Socio). Las operaciones actuales no lo usan.
+-async function resolver(req: IncomingMessage, url: URL, _quien: Socio | undefined): Promise<Operacion> {
++async function resolver(req: IncomingMessage, url: URL, quien: Socio | undefined): Promise<Operacion> {
+   const metodo = req.method ?? "GET";
+   const partes = url.pathname.split("/").filter(Boolean);
+   const q = url.searchParams;
+@@ -67,6 +67,39 @@ async function resolver(req: IncomingMessage, url: URL, _quien: Socio | undefine
+     const texto = q.get("texto") ?? undefined;
+     return { nombre: "buscarSocios", argumentos: { texto }, ejecutar: () => club.buscarSocios(texto) };
+   }
++  if (recurso === "reservas" && id === "exportar" && !accion && metodo === "GET") {
++    if (!quien) throw new ErrorDelClub("NO_IDENTIFICADO", "Debes identificarte para exportar reservas", 401);
++    if (quien.rol !== "gestor") throw new ErrorDelClub("SIN_PERMISO", "Solo los gestores pueden exportar reservas", 403);
++    const desde = q.get("desde");
++    const hasta = q.get("hasta");
++    const estadoFiltro = q.get("estado") ?? undefined;
++    const esFechaValida = (fecha: string | null) => {
++      if (!fecha || !/^\d{4}-\d{2}-\d{2}$/.test(fecha)) return false;
++      const fechaUtc = new Date(`${fecha}T00:00:00Z`);
++      return !Number.isNaN(fechaUtc.getTime()) && fechaUtc.toISOString().slice(0, 10) === fecha;
++    };
++    if (!esFechaValida(desde) || !esFechaValida(hasta) || desde! > hasta!) {
++      throw new ErrorDelClub("DATOS_INVALIDOS", "desde y hasta son obligatorios, deben tener formato AAAA-MM-DD y desde no puede ser posterior a hasta", 400);
++    }
++    const dias = (Date.parse(`${hasta}T00:00:00Z`) - Date.parse(`${desde}T00:00:00Z`)) / 86_400_000 + 1;
++    if (dias > 92) throw new ErrorDelClub("RANGO_DEMASIADO_GRANDE", "El periodo no puede superar 92 días", 400);
++    if (estadoFiltro !== undefined && !["confirmada", "cancelada", "no_presentada"].includes(estadoFiltro)) {
++      throw new ErrorDelClub("DATOS_INVALIDOS", 'estado debe ser "confirmada", "cancelada" o "no_presentada"', 400);
++    }
++    const escapar = (valor: string) => /[\",\r\n]/.test(valor) ? `"${valor.replace(/"/g, '""')}"` : valor;
++    const euros = (centimos: number) => `${Math.floor(centimos / 100)}.${String(centimos % 100).padStart(2, "0")}`;
++    const filas = estado.reservas
++      .filter((r) => r.inicio.slice(0, 10) >= desde! && r.inicio.slice(0, 10) <= hasta! && (!estadoFiltro || r.estado === estadoFiltro))
++      .sort((a, b) => a.inicio.localeCompare(b.inicio) || a.pistaId.localeCompare(b.pistaId))
++      .map((r) => {
++        const socio = estado.socios.find((s) => s.id === r.socioId)!;
++        const pista = estado.pistas.find((p) => p.id === r.pistaId)!;
++        return [r.id, r.inicio.slice(0, 10), r.inicio.slice(11), pista.nombre, socio.nombre, socio.email, r.estado,
++          euros(r.importe), r.penalizacion === undefined ? "" : euros(r.penalizacion), r.notas].map(escapar).join(",");
++      });
++    const csv = ["id,fecha,hora,pista,socio,email,estado,importe,penalizacion,notas", ...filas].join("\r\n") + "\r\n";
++    return { nombre: "exportarReservasCsv", argumentos: { desde, hasta, estado: estadoFiltro }, ejecutar: () => csv };
++  }
+   if (recurso === "reservas" && !id && metodo === "GET") {
+     const filtros: FiltrosReservas = {
+       fecha: q.get("fecha") ?? undefined,
+@@ -131,7 +164,13 @@ const servidor = createServer(async (req, res) => {
+     operacion = await resolver(req, url, quien);
+     const resultado = operacion.ejecutar();
+     anotar(true);
+-    responder(operacion.nombre === "crearReserva" ? 201 : 200, resultado);
++    if (operacion.nombre === "exportarReservasCsv") {
++      res.writeHead(200, {
++        "content-type": "text/csv; charset=utf-8",
++        "content-disposition": `attachment; filename="reservas-${(operacion.argumentos as { desde: string }).desde}-${(operacion.argumentos as { hasta: string }).hasta}.csv"`,
++      });
++      res.end(resultado as string);
++    } else responder(operacion.nombre === "crearReserva" ? 201 : 200, resultado);
+   } catch (error) {
+     if (error instanceof ErrorDelClub) {
+       anotar(false, error.codigo);
+diff --git a/test/club.test.ts b/test/club.test.ts
+index 5dc8821..1a5a289 100644
+--- a/test/club.test.ts
++++ b/test/club.test.ts
+@@ -56,6 +56,38 @@ test("la cabecera X-Socio identifica a quien llama", async () => {
+   assert.equal((await api.pedir("GET", "/api/pistas", { socio: "socio-040" })).status, 200);
+ });
+ 
++test("exportar reservas genera CSV RFC 4180 para gestores", async () => {
++  const ruta = "/api/reservas/exportar?desde=2026-11-18&hasta=2026-11-20";
++  assert.equal((await api.pedir("GET", ruta)).cuerpo.error.codigo, "NO_IDENTIFICADO");
++  const socio = await api.pedir("GET", ruta, { socio: "socio-003" });
++  assert.equal(socio.status, 403);
++  assert.equal(socio.cuerpo.error.codigo, "SIN_PERMISO");
++  const csv = await api.pedir("GET", ruta, { socio: "socio-040" });
++  assert.equal(csv.status, 200);
++  assert.equal(csv.cabeceras.get("content-type"), "text/csv; charset=utf-8");
++  assert.equal(csv.cabeceras.get("content-disposition"), 'attachment; filename="reservas-2026-11-18-2026-11-20.csv"');
++  assert.equal(csv.texto.split("\r\n")[0], "id,fecha,hora,pista,socio,email,estado,importe,penalizacion,notas");
++  assert.ok(csv.texto.endsWith("\r\n"));
++  assert.ok(!csv.texto.replace(/\r\n/g, "").includes("\n"));
++  const filas = csv.texto.trimEnd().split("\r\n").slice(1);
++  assert.ok(filas.length > 0);
++  for (const fila of filas) assert.match(fila, /^R-\d{4},2026-11-(18|19|20),\d\d:\d\d,Pista [1-4],/);
++  const filtrada = await api.pedir("GET", `${ruta}&estado=cancelada`, { socio: "socio-040" });
++  assert.ok(filtrada.texto.split("\r\n").slice(1, -1).every((fila) => fila.split(",")[6] === "cancelada"));
++});
++
++test("exportar valida el periodo y el estado", async () => {
++  const base = "/api/reservas/exportar";
++  for (const qs of ["", "?desde=2026-11-01", "?desde=2026-02-30&hasta=2026-03-01", "?desde=2026-11-02&hasta=2026-11-01", "?desde=2026-11-01&hasta=2026-11-02&estado=otra"]) {
++    const respuesta = await api.pedir("GET", `${base}${qs}`, { socio: "socio-040" });
++    assert.equal(respuesta.status, 400);
++    assert.equal(respuesta.cuerpo.error.codigo, "DATOS_INVALIDOS");
++  }
++  const grande = await api.pedir("GET", `${base}?desde=2026-01-01&hasta=2026-04-03`, { socio: "socio-040" });
++  assert.equal(grande.status, 400);
++  assert.equal(grande.cuerpo.error.codigo, "RANGO_DEMASIADO_GRANDE");
++});
++
+ test("el reloj del club se puede mover en las pruebas", async () => {
+   const otra = await arrancarApi({ AHORA: "2026-11-23T20:00" });
+   try {

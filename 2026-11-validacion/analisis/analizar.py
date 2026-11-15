@@ -42,6 +42,18 @@ def coste(m: dict | None) -> float | None:
     return (sin_cache * p["entrada"] + (m.get("entrada_cache_leida") or 0) * p["cache"] + salida * p["salida"]) / 1e6
 
 
+def solo_lo_reanudado(d: dict, impl: dict) -> dict:
+    """D reanuda la sesión que implementó, y al reanudar Claude Code da el coste de toda la sesión (total_cost_usd y
+    modelUsage, aunque `usage` sí es solo de la ejecución) y Codex los tokens de todo el hilo (turn.completed). Lo que
+    cuesta validar en la misma sesión es la diferencia con lo que ya había gastado la implementación. OpenCode da los
+    tokens de cada paso de la ejecución, así que ya vienen separados."""
+    if d.get("agente") == "claude":
+        return {**d, "coste_usd": (d.get("coste_usd") or 0) - (impl.get("coste_usd") or 0)}
+    if d.get("agente") == "codex":
+        return {**d, **{k: (d.get(k) or 0) - (impl.get(k) or 0) for k in ("entrada", "entrada_cache_leida", "salida", "razonamiento")}}
+    return d
+
+
 def suma(valores):
     vs = list(valores)
     return None if any(v is None for v in vs) else sum(vs)
@@ -101,7 +113,7 @@ def analizar(lotes: list[str]) -> dict:
                 "A_gate": r["A"]["gate_ok"], "coste_implementar": coste(impl), "minutos_implementar": (impl.get("duracion_s") or 0) / 60,
                 "B": rama_resumen(r, "B"), "C": rama_resumen(r, "C"),
                 "D": deteccion((r.get("D") or {}).get("veredicto"), r["A"]) if r.get("D") else None,
-                "D_coste": coste((r.get("D") or {}).get("validacion")) if r.get("D") else None,
+                "D_coste": coste(solo_lo_reanudado(r["D"]["validacion"], impl)) if r.get("D") else None,
             }
             cadenas.append(fila)
     tabla = {}
