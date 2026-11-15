@@ -65,6 +65,27 @@ El piloto de los difíciles (`resultados/piloto-dificil/`: los tres encargos, un
 - **Fallos ajenos al agente.** Si una ejecución falla por la cuota, el límite de uso, la red o la autenticación, la cadena se corta, se anota como `AJENO` y no se guarda como terminada. No es un dato del experimento: al relanzar el lote, se repite entera.
 - **Versiones fijas.** Claude Code corre con `DISABLE_AUTOUPDATER=1` y OpenCode con `autoupdate: false`, para que ninguno cambie de versión a mitad de lote. Cada ejecución de Claude guarda además cuánta cuota llevaba gastada la cuenta, para planificar los lotes.
 
+## Tramo de encargos grandes (15 de noviembre)
+
+Diseño fijado antes de ejecutarlo, después de ver los resultados del lote completo. Los encargos de ese lote son features acotadas: entre 9 y 13 criterios y unos minutos de trabajo para cada agente. Casi todo lo que se sigue recomendando a favor de un validador independiente viene de trabajos largos, así que este tramo repite el experimento con dos encargos del tamaño de varias features juntas:
+
+| Encargo | Criterios | Qué pide |
+|---|---|---|
+| `torneos` | 25 | Torneos de parejas por eliminación directa: la recepción bloquea las pistas, los socios se inscriben por parejas y, al cerrar, se generan el cuadro (con descansos) y el calendario. Después se apuntan y se corrigen resultados hasta que hay una pareja campeona |
+| `partidos-abiertos` | 21 | Partidos que organiza un socio y a los que se apuntan otros, con niveles de juego, el importe a partes iguales, salidas y cancelaciones con penalización, cancelación automática si no se llena y el límite de 3 reservas contando los partidos |
+
+Lo que cambia respecto al lote completo:
+
+- **Condiciones A, B y C.** D se quita: en el lote completo detectó lo mismo que la primera validación de B, y solo medía detección.
+- **Tres repeticiones** por configuración y encargo: 30 cadenas.
+- **Más tiempo:** 120 minutos para implementar, 45 para validar y 60 para reparar, frente a 45, 25 y 30 en el lote completo. El gate del corrector tiene 10 minutos y los tests ocultos, 15.
+
+Lo que no cambia: los cinco modelos y las versiones de sus agentes, los prompts y el protocolo de validación, el máximo de dos reparaciones, la verdad de referencia (tests ocultos por criterio, una referencia que los pasa todos y una base que los suspende salvo los de "lo demás no cambia") y la regla de "compensa", que aquí se aplica a las 6 implementaciones de cada configuración.
+
+- **Los tests ocultos y las referencias** los escribieron agentes distintos (Claude Opus 5.5) a partir de la spec, sin ver unos el trabajo de los otros. Donde no coincidían, se decidió con el texto de la spec antes de ejecutar nada.
+- **La revisión a mano y la vara ampliada** se hacen como en el lote completo (`analisis/revision/` y la regla de `analisis/ampliados/gravedad.json`), después de ver los datos, y se dan aparte.
+- **Piloto:** antes del lote, una implementación de cada configuración y encargo, solo con A, para comprobar los tiempos y el corrector. No entra en los resultados.
+
 ## Qué se mide
 
 **Principal**, por configuración:

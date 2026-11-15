@@ -14,6 +14,8 @@ from agentes import HOME, LAB, OCULTAR, SCR, caja
 
 OCULTOS = LAB / "ocultos"
 SPECS = LAB / "club" / "docs" / "specs"
+# Los encargos del tramo grande (ver el README): más tiempo para el gate y para los tests ocultos.
+GRANDES = {"torneos", "partidos-abiertos"}
 
 
 def criterios_de(encargo: str) -> list[int]:
@@ -58,20 +60,21 @@ def evaluar(estado: Path, encargo: str) -> dict:
     with tempfile.TemporaryDirectory(dir=raiz) as tmp:
         copia = Path(tmp) / "repo"
         copiar_estado(estado, copia)
-        rc_gate, salida_gate = ejecutar_en_caja(copia, ["npm", "run", "check"], 300)
+        grande = encargo in GRANDES
+        rc_gate, salida_gate = ejecutar_en_caja(copia, ["npm", "run", "check"], 600 if grande else 300)
         ocultos = copia / "test-ocultos"
         ocultos.mkdir()
         shutil.copy(OCULTOS / "ayuda.ts", ocultos / "ayuda.ts")
         for f in sorted((OCULTOS / encargo).glob("*.test.ts")):
             shutil.copy(f, ocultos / f.name)
         orden = ["node", "--test", "--test-reporter=tap", "--test-timeout=60000", "test-ocultos/"]
-        rc_ocultos, salida = ejecutar_en_caja(copia, orden, 600)
+        rc_ocultos, salida = ejecutar_en_caja(copia, orden, 900 if grande else 600)
         tests = leer_tap(salida)
         inestables = []
         if not tests or not all(tests.values()):
             # Un test que falla se repite una vez, para no confundir un fallo por carga de la máquina con un
             # fallo de la implementación. Cuenta como pasado si pasa en alguna de las dos.
-            rc2, salida2 = ejecutar_en_caja(copia, orden, 600)
+            rc2, salida2 = ejecutar_en_caja(copia, orden, 900 if grande else 600)
             segunda = leer_tap(salida2)
             inestables = [n for n, ok in tests.items() if not ok and segunda.get(n)]
             tests = {n: ok or bool(segunda.get(n)) for n, ok in {**segunda, **tests}.items()}

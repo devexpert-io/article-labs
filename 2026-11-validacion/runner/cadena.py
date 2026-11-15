@@ -17,7 +17,7 @@ from pathlib import Path
 
 import prompts
 from agentes import CONFIGS, LAB, SCR, VALIDADOR_FRONTERA, lanzar
-from calificar import copiar_estado, evaluar
+from calificar import GRANDES, copiar_estado, evaluar
 
 class FalloAjeno(RuntimeError):
     """El agente no pudo trabajar por algo ajeno al experimento: cuota, límite de uso, red o autenticación."""
@@ -48,6 +48,14 @@ LIMITE_IMPLEMENTAR = 45 * 60
 LIMITE_VALIDAR = 25 * 60
 LIMITE_REPARAR = 30 * 60
 MAX_REPARACIONES = 2
+# Los encargos grandes tienen más margen (fijado antes de ejecutarlos, ver el README).
+LIMITES_GRANDES = {"implementar": 120 * 60, "validar": 45 * 60, "reparar": 60 * 60}
+
+
+def limite(encargo: str, paso: str) -> int:
+    if encargo in GRANDES:
+        return LIMITES_GRANDES[paso]
+    return {"implementar": LIMITE_IMPLEMENTAR, "validar": LIMITE_VALIDAR, "reparar": LIMITE_REPARAR}[paso]
 
 
 def git(cwd: Path, *args: str) -> str:
@@ -121,7 +129,7 @@ def rama(nombre: str, impl: Path, base: Path, encargo: str, implementador: str, 
     evaluacion = evaluacion_inicial
     for ronda in range(1, MAX_REPARACIONES + 2):
         v = comprobar(lanzar(validador, prompts.validar(encargo), trabajo, logs / f"{nombre}-validar{ronda}.jsonl",
-                             limite_s=LIMITE_VALIDAR), f"{nombre}-validar{ronda}")
+                             limite_s=limite(encargo, "validar")), f"{nombre}-validar{ronda}")
         veredicto = leer_veredicto(v.get("respuesta_final", ""))
         tocados = cambios_sin_fijar(trabajo)
         descartar(trabajo)
@@ -131,7 +139,7 @@ def rama(nombre: str, impl: Path, base: Path, encargo: str, implementador: str, 
         if veredicto is None or veredicto["veredicto"] == "accept" or ronda > MAX_REPARACIONES:
             break
         r = comprobar(lanzar(implementador, prompts.reparar(encargo, veredicto), trabajo,
-                             logs / f"{nombre}-reparar{ronda}.jsonl", limite_s=LIMITE_REPARAR), f"{nombre}-reparar{ronda}")
+                             logs / f"{nombre}-reparar{ronda}.jsonl", limite_s=limite(encargo, "reparar")), f"{nombre}-reparar{ronda}")
         paso["reparacion"] = resumen(r)
         paso["commit"] = fijar(trabajo, f"reparacion-{ronda}")
         evaluacion = evaluar(trabajo, encargo)
@@ -156,7 +164,7 @@ def ejecutar(lote: str, encargo: str, config: str, rep: int, condiciones: str = 
     r = {"id": cid, "lote": lote, "encargo": encargo, "config": config, "rep": rep, **CONFIGS[config]}
 
     m = comprobar(lanzar(config, prompts.implementar(encargo), impl, logs / "implementar.jsonl", persistir=True,
-                         limite_s=LIMITE_IMPLEMENTAR), "implementar")
+                         limite_s=limite(encargo, "implementar")), "implementar")
     r["implementacion"] = resumen(m)
     r["commit_implementacion"] = fijar(impl, "implementacion")
     (logs / "implementacion.diff").write_text(git(impl, "diff", "base", "HEAD"))
@@ -165,7 +173,7 @@ def ejecutar(lote: str, encargo: str, config: str, rep: int, condiciones: str = 
 
     if "D" in condiciones and m.get("sesion"):
         d = comprobar(lanzar(config, prompts.validar(encargo), impl, logs / "D-validar.jsonl", reanudar=m["sesion"],
-                             limite_s=LIMITE_VALIDAR), "D-validar")
+                             limite_s=limite(encargo, "validar")), "D-validar")
         r["D"] = {"validacion": resumen(d), "veredicto": leer_veredicto(d.get("respuesta_final", "")),
                   "validador_toco": cambios_sin_fijar(impl)}
         descartar(impl)
