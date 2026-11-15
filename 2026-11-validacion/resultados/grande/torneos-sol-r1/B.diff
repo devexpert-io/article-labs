@@ -1,0 +1,654 @@
+diff --git a/README.md b/README.md
+index 256e5c2..5080464 100644
+--- a/README.md
++++ b/README.md
+@@ -16,7 +16,7 @@ En el club siempre es miércoles 18 de noviembre de 2026 a las 10:00, salvo que
+ - **Fechas y horas:** las locales del club (Europe/Madrid), como texto: `AAAA-MM-DD` y `AAAA-MM-DDTHH:MM`.
+ - **Franjas:** de 90 minutos, que empiezan a las 09:00, 10:30, 12:00, 13:30, 15:00, 16:30, 18:00, 19:30 y 21:00.
+ - **Precios:** cada pista tiene precio de valle y de punta. Es punta a partir de las 18:00 y todo el fin de semana.
+-- **Identidad:** la cabecera `X-Socio` lleva el id del socio que hace la petición. Es opcional. Si lleva un id que no existe, la API responde `401 NO_IDENTIFICADO`. Los socios tienen rol `socio` o `gestor`. En la semilla, el único gestor es `socio-040` (la recepción del club).
++- **Identidad:** la cabecera `X-Socio` lleva el id del socio que hace la petición. Es obligatoria para las operaciones de torneos que requieren permiso y opcional para el resto. Si lleva un id que no existe, la API responde `401 NO_IDENTIFICADO`. Los socios tienen rol `socio` o `gestor`. En la semilla, el único gestor es `socio-040` (la recepción del club).
+ - **Errores:** `{"error": {"codigo": "…", "mensaje": "…"}}` con su código HTTP: 400 si los datos no valen, 401 si no se sabe quién llama, 403 si no tiene permiso, 404 si algo no existe y 409 si lo impide una regla del club.
+ 
+ ## Reglas del club
+@@ -35,7 +35,7 @@ En el club siempre es miércoles 18 de noviembre de 2026 a las 10:00, salvo que
+ 
+ ### Disponibilidad
+ 
+-- `GET /api/disponibilidad?fecha=AAAA-MM-DD[&pista=<id>]`: las franjas de ese día por pista, cada una con `inicio`, `fin`, `estado` (`libre`, `reservada` o `cerrada`) y `precio`.
++- `GET /api/disponibilidad?fecha=AAAA-MM-DD[&pista=<id>]`: las franjas de ese día por pista, cada una con `inicio`, `fin`, `estado` (`libre`, `reservada`, `cerrada` o `torneo`; este último incluye `torneoId`) y `precio`.
+ 
+ ### Socios
+ 
+@@ -50,6 +50,39 @@ En el club siempre es miércoles 18 de noviembre de 2026 a las 10:00, salvo que
+ 
+ Una reserva tiene `id`, `socioId`, `pistaId`, `inicio`, `fin`, `estado`, `importe`, `notas` y, si se canceló, `penalizacion` y `motivoCancelacion`.
+ 
++### Torneos
++
++La consulta es pública. Solo un gestor puede crear, cerrar o cancelar un torneo y anotar resultados. Para inscribir o dar de baja a una pareja, debe llamar uno de sus dos socios o un gestor, identificado con `X-Socio`. Sin identificación se responde `401 NO_IDENTIFICADO`; sin permiso, `403 SIN_PERMISO`.
++
++- `POST /api/torneos` con `{ nombre, pistas, franjas, plazas, cuota }`: crea un torneo; responde `201 { torneo }`. El nombre debe ser un texto no vacío; pistas y franjas, listas no vacías sin repetidos; plazas, un entero de 4 a 16; cuota, un entero no negativo en céntimos por pareja. Todas las pistas deben existir y estar operativas; todas las franjas deben ser válidas, futuras y libres en todas las pistas.
++- `GET /api/torneos[?estado=<estado>]`: responde `{ torneos }`, ordenados por su primera franja, incluidos los cancelados. Cada resumen trae `id`, `nombre`, `estado`, `plazas`, `cuota` e `inscritas` (parejas activas). Un filtro de estado desconocido da `400 DATOS_INVALIDOS`.
++- `GET /api/torneos/:id`: responde `{ torneo }`, con inscripciones y partidos.
++- `POST /api/torneos/:id/inscripciones` con `{ socios: [id, id] }`: responde `201 { inscripcion }`. Los dos socios deben ser distintos, existir y tener la cuota al día. Nadie puede estar en dos inscripciones activas del mismo torneo. No se pueden superar las plazas.
++- `POST /api/torneos/:id/inscripciones/:inscripcionId/baja`: responde `{ inscripcion }` con estado `baja`. Conserva el historial, libera la plaza y permite volver a inscribir a los socios.
++- `POST /api/torneos/:id/cerrar`: responde `{ torneo }`. Requiere estado `inscripcion` y al menos dos parejas activas. Genera todos los partidos y su calendario y pasa a `en_juego`. Se puede cerrar antes de acabar el plazo de inscripción. Si no caben los partidos, responde `409 FRANJAS_INSUFICIENTES` y conserva el torneo intacto.
++- `POST /api/torneos/:id/partidos/:partidoId/resultado` con `{ ganadora, marcador? }`: responde `{ partido }`. La ganadora es el id de una de las dos inscripciones del partido y el marcador es un texto libre, o `null` si se omite. Requiere torneo `en_juego`, las dos parejas conocidas y que el partido haya empezado según el reloj del club. La ganadora avanza de ronda. Se puede corregir un resultado hasta que se juegue el siguiente partido al que da acceso. La final establece la campeona y pasa el torneo a `terminado`.
++- `POST /api/torneos/:id/cancelar`: responde `{ torneo }` con estado `cancelado` y libera todas las franjas, incluso estando `en_juego`. No permite cancelar un torneo terminado ni uno ya cancelado.
++
++Un torneo tiene `id`, `nombre`, `pistas` (en el orden indicado), `franjas` (orden cronológico), `plazas`, `cuota`, `estado` (`inscripcion`, `en_juego`, `terminado` o `cancelado`), `inscripciones`, `partidos` y `campeona` (id de inscripción o `null`). Una inscripción tiene `id`, `socios`, `estado` (`inscrita` o `baja`) e `importe`, igual a la cuota anotada del torneo: no se realiza ningún cobro.
++
++Inscribirse y darse de baja requiere estado `inscripcion` y que falten **48 horas o más** para la primera franja. Las inscripciones se conservan por orden de alta; las bajas no participan en el cuadro ni ocupan plaza.
++
++El cuadro es de eliminación directa. Con N parejas activas, T es la menor potencia de dos mayor o igual que N. En la primera ronda, el partido i enfrenta la pareja i con la T+1−i, por orden de inscripción; si la segunda no existe, la primera avanza por descanso. En cada ronda siguiente, el partido j enfrenta a las ganadoras de los partidos j y M+1−j de la anterior (M es el número de partidos de aquella ronda). Con dos parejas solo hay una final.
++
++Un partido tiene `id`, `ronda` y `numero` (desde 1), `parejas` (dos ids de inscripción, con `null` donde aún no se conoce), `estado` (`pendiente`, `jugado` o `descanso`), `ganadora`, `marcador`, `pistaId` e `inicio`. Estos cuatro últimos campos empiezan en `null`, salvo la ganadora de un descanso; los descansos nunca tienen pista ni hora.
++
++El calendario asigna partidos por ronda y número a la primera combinación disponible: primero la franja más temprana que no haya empezado, después el orden de `pistas`. Un partido debe empezar al terminar o después de los partidos que le aportan las parejas, sin contar descansos. Cada partido dura 90 minutos. Al crear se bloquean todas las combinaciones de pistas y franjas; al cerrar solo quedan bloqueadas las usadas por partidos. Los bloqueos permanecen mientras el torneo no esté cancelado, incluso terminado. En disponibilidad aparecen con estado `torneo` y `torneoId`; intentar reservarlos da `409 FRANJA_NO_DISPONIBLE`. Los partidos no son reservas, no aparecen en su listado ni consumen el límite de tres reservas futuras.
++
++Errores de torneos (además de los de identificación y permiso):
++
++- **400:** `DATOS_INVALIDOS`, `FRANJA_INVALIDA`.
++- **404:** `TORNEO_NO_ENCONTRADO` (en cualquier endpoint del torneo), `PISTA_NO_ENCONTRADA`, `SOCIO_NO_ENCONTRADO`, `INSCRIPCION_NO_ENCONTRADA`, `PARTIDO_NO_ENCONTRADO`.
++- **409 al crear:** `FRANJA_PASADA`, `PISTA_CERRADA`, `FRANJAS_OCUPADAS`. Este último incluye en `error.conflictos` todos los choques, con `{ pistaId, inicio, reservaId }` o `{ pistaId, inicio, torneoId }`; no crea nada.
++- **409 al inscribir o dar de baja:** `CUOTA_INACTIVA`, `YA_INSCRITO`, `TORNEO_COMPLETO`, `INSCRIPCION_CERRADA`, `YA_DE_BAJA`.
++- **409 al cerrar:** `TORNEO_NO_EN_INSCRIPCION`, `PAREJAS_INSUFICIENTES`, `FRANJAS_INSUFICIENTES`.
++- **409 al anotar resultados:** `TORNEO_NO_EN_JUEGO`, `PARTIDO_NO_LISTO`, `PARTIDO_NO_EMPEZADO`, `RESULTADO_CERRADO`.
++- **409 al cancelar:** `TORNEO_TERMINADO`, `YA_CANCELADO`.
++
+ ### Solo para pruebas
+ 
+ - `GET /_estado`: el estado completo del club.
+diff --git a/src/nucleo.ts b/src/nucleo.ts
+index 62ed37b..8b451f5 100644
+--- a/src/nucleo.ts
++++ b/src/nucleo.ts
+@@ -1,14 +1,16 @@
+ // Las operaciones del club y sus reglas. La API HTTP (src/servidor.ts) es la única que las llama.
+ import { finDeFranja, HORAS, precio } from "./semilla.ts";
+-import type { Estado, EstadoReserva, Reserva } from "./tipos.ts";
++import type { Conflicto, Estado, EstadoReserva, Inscripcion, Partido, Reserva, Socio, Torneo } from "./tipos.ts";
+ 
+ export class ErrorDelClub extends Error {
+   codigo: string;
+   http: number;
+-  constructor(codigo: string, mensaje: string, http = 409) {
++  conflictos?: Conflicto[];
++  constructor(codigo: string, mensaje: string, http = 409, conflictos?: Conflicto[]) {
+     super(mensaje);
+     this.codigo = codigo;
+     this.http = http;
++    this.conflictos = conflictos;
+   }
+ }
+ 
+@@ -56,7 +58,174 @@ export function crearClub(estado: Estado) {
+   const ocupada = (pistaId: string, inicio: string) =>
+     estado.reservas.some((r) => r.pistaId === pistaId && r.inicio === inicio && r.estado === "confirmada");
+ 
++  const torneo = (id: string) => {
++    const t = estado.torneos.find((t) => t.id === id);
++    if (!t) throw new ErrorDelClub("TORNEO_NO_ENCONTRADO", "No existe el torneo", 404);
++    return t;
++  };
++  const permiso = (quien: Socio | undefined, socios: string[] = []) => {
++    if (!quien) throw new ErrorDelClub("NO_IDENTIFICADO", "Hace falta X-Socio", 401);
++    if (quien.rol !== "gestor" && !socios.includes(quien.id)) {
++      throw new ErrorDelClub("SIN_PERMISO", "No tienes permiso", 403);
++    }
++  };
++  const bloquea = (t: Torneo, pistaId: string, inicio: string) => t.estado !== "cancelado" &&
++    (t.estado === "inscripcion" ? t.pistas.includes(pistaId) && t.franjas.includes(inicio) :
++      t.partidos.some((p) => p.pistaId === pistaId && p.inicio === inicio));
++  const bloqueo = (pistaId: string, inicio: string) => estado.torneos.find((t) => bloquea(t, pistaId, inicio));
++  const plazo = (t: Torneo) => {
++    if (t.estado !== "inscripcion" || horasEntre(estado.ahora, t.franjas[0]!) < 48) {
++      throw new ErrorDelClub("INSCRIPCION_CERRADA", "La inscripción está cerrada");
++    }
++  };
++  // El emparejamiento de cada ronda refleja los extremos de la anterior.
++  const siguiente = (partidos: Partido[], p: Partido) => {
++    const m = partidos.filter((otro) => otro.ronda === p.ronda).length;
++    const numero = Math.min(p.numero, m + 1 - p.numero);
++    const partido = partidos.find((otro) => otro.ronda === p.ronda + 1 && otro.numero === numero);
++    return { partido, lado: p.numero <= m / 2 ? 0 : 1 };
++  };
++  const avanzar = (partidos: Partido[], p: Partido) => {
++    const { partido, lado } = siguiente(partidos, p);
++    if (partido) partido.parejas[lado] = p.ganadora;
++  };
++
+   return {
++    crearTorneo(datos: Record<string, unknown>, quien?: Socio) {
++      permiso(quien);
++      const { nombre, pistas, franjas, plazas, cuota } = datos;
++      const lista = (v: unknown): v is string[] => Array.isArray(v) && v.length > 0 &&
++        v.every((x) => typeof x === "string") && new Set(v).size === v.length;
++      if (typeof nombre !== "string" || !nombre.trim() || !lista(pistas) || !lista(franjas) ||
++        typeof plazas !== "number" || !Number.isInteger(plazas) || plazas < 4 || plazas > 16 ||
++        typeof cuota !== "number" || !Number.isInteger(cuota) || cuota < 0) invalido("Datos del torneo inválidos");
++      const ps = pistas.map(pista);
++      for (const inicio of franjas) {
++        const fecha = new Date(`${inicio.slice(0, 10)}T00:00:00Z`);
++        if (!FECHA_HORA.test(inicio) || !HORAS.includes(inicio.slice(11)) ||
++          !Number.isFinite(fecha.getTime()) || fecha.toISOString().slice(0, 10) !== inicio.slice(0, 10)) {
++          throw new ErrorDelClub("FRANJA_INVALIDA", "Franja inválida", 400);
++        }
++        if (inicio <= estado.ahora) throw new ErrorDelClub("FRANJA_PASADA", "La franja ya ha empezado");
++      }
++      if (ps.some((p) => p.estado === "cerrada")) throw new ErrorDelClub("PISTA_CERRADA", "Una pista está cerrada");
++      const conflictos: Conflicto[] = [];
++      for (const pistaId of pistas) for (const inicio of franjas) {
++        for (const r of estado.reservas.filter((r) => r.pistaId === pistaId && r.inicio === inicio && r.estado === "confirmada")) {
++          conflictos.push({ pistaId, inicio, reservaId: r.id });
++        }
++        for (const t of estado.torneos.filter((t) => bloquea(t, pistaId, inicio))) conflictos.push({ pistaId, inicio, torneoId: t.id });
++      }
++      if (conflictos.length) throw new ErrorDelClub("FRANJAS_OCUPADAS", "Hay franjas ocupadas", 409, conflictos);
++      const t: Torneo = { id: `T-${estado.torneos.length + 1}`, nombre, pistas: [...pistas], franjas: [...franjas].sort(),
++        plazas, cuota, estado: "inscripcion", inscripciones: [], partidos: [], campeona: null };
++      estado.torneos.push(t);
++      return { torneo: t };
++    },
++
++    obtenerTorneo(id: string) { return { torneo: torneo(id) }; },
++
++    listarTorneos(filtro?: string) {
++      if (filtro !== undefined && !["inscripcion", "en_juego", "terminado", "cancelado"].includes(filtro)) invalido("Estado inválido");
++      return { torneos: estado.torneos.filter((t) => filtro === undefined || t.estado === filtro)
++        .sort((a, b) => a.franjas[0]!.localeCompare(b.franjas[0]!))
++        .map((t) => ({ id: t.id, nombre: t.nombre, estado: t.estado, plazas: t.plazas, cuota: t.cuota,
++          inscritas: t.inscripciones.filter((i) => i.estado === "inscrita").length })) };
++    },
++
++    inscribirPareja(id: string, socios: unknown, quien?: Socio) {
++      if (!quien) permiso(quien);
++      const t = torneo(id);
++      if (!Array.isArray(socios) || socios.length !== 2 || socios.some((s) => typeof s !== "string") || socios[0] === socios[1]) invalido("Se necesitan dos socios distintos");
++      permiso(quien, socios);
++      plazo(t);
++      for (const id of socios) {
++        const s = estado.socios.find((s) => s.id === id);
++        if (!s) throw new ErrorDelClub("SOCIO_NO_ENCONTRADO", "No existe el socio", 404);
++        if (!s.cuotaActiva) throw new ErrorDelClub("CUOTA_INACTIVA", "Cuota inactiva");
++        if (t.inscripciones.some((i) => i.estado === "inscrita" && i.socios.includes(id))) throw new ErrorDelClub("YA_INSCRITO", "Socio ya inscrito");
++      }
++      if (t.inscripciones.filter((i) => i.estado === "inscrita").length >= t.plazas) throw new ErrorDelClub("TORNEO_COMPLETO", "Torneo completo");
++      const i: Inscripcion = { id: `${t.id}-I-${t.inscripciones.length + 1}`, socios: [socios[0], socios[1]], estado: "inscrita", importe: t.cuota };
++      t.inscripciones.push(i);
++      return { inscripcion: i };
++    },
++
++    bajaPareja(id: string, inscripcionId: string, quien?: Socio) {
++      if (!quien) permiso(quien);
++      const t = torneo(id);
++      const i = t.inscripciones.find((i) => i.id === inscripcionId);
++      if (!i) throw new ErrorDelClub("INSCRIPCION_NO_ENCONTRADA", "No existe la inscripción", 404);
++      permiso(quien, i.socios);
++      plazo(t);
++      if (i.estado === "baja") throw new ErrorDelClub("YA_DE_BAJA", "La pareja ya estaba de baja");
++      i.estado = "baja";
++      return { inscripcion: i };
++    },
++
++    cerrarTorneo(id: string, quien?: Socio) {
++      permiso(quien);
++      const t = torneo(id);
++      if (t.estado !== "inscripcion") throw new ErrorDelClub("TORNEO_NO_EN_INSCRIPCION", "El torneo no está en inscripción");
++      const inscritas = t.inscripciones.filter((i) => i.estado === "inscrita");
++      if (inscritas.length < 2) throw new ErrorDelClub("PAREJAS_INSUFICIENTES", "Hacen falta dos parejas");
++      let tamano = 2;
++      while (tamano < inscritas.length) tamano *= 2;
++      const partidos: Partido[] = [];
++      for (let ronda = 1, cantidad = tamano / 2; cantidad >= 1; ronda++, cantidad /= 2) {
++        for (let numero = 1; numero <= cantidad; numero++) {
++          const parejas: Partido["parejas"] = ronda === 1 ? [inscritas[numero - 1]!.id, inscritas[tamano - numero]?.id ?? null] : [null, null];
++          const descanso = ronda === 1 && parejas[1] === null;
++          partidos.push({ id: `${t.id}-P-${partidos.length + 1}`, ronda, numero, parejas,
++            estado: descanso ? "descanso" : "pendiente", ganadora: descanso ? parejas[0] : null,
++            marcador: null, pistaId: null, inicio: null });
++        }
++      }
++      for (const p of partidos) {
++        if (p.estado === "descanso") { avanzar(partidos, p); continue; }
++        const anterior = partidos.filter((otro) => otro.ronda === p.ronda - 1);
++        const fuentes = anterior.filter((otro) => otro.numero === p.numero || otro.numero === anterior.length + 1 - p.numero);
++        const fin = fuentes.reduce((max, otro) => otro.inicio ? [max, finDeFranja(otro.inicio)].sort()[1]! : max, "");
++        for (const inicio of t.franjas) {
++          if (inicio <= estado.ahora || inicio < fin) continue;
++          const pistaId = t.pistas.find((pistaId) => !partidos.some((otro) => otro.inicio === inicio && otro.pistaId === pistaId));
++          if (pistaId) { p.inicio = inicio; p.pistaId = pistaId; break; }
++        }
++        if (!p.inicio) throw new ErrorDelClub("FRANJAS_INSUFICIENTES", "No hay franjas para todos los partidos");
++      }
++      t.partidos = partidos;
++      t.estado = "en_juego";
++      return { torneo: t };
++    },
++
++    resultadoPartido(id: string, partidoId: string, datos: Record<string, unknown>, quien?: Socio) {
++      permiso(quien);
++      const t = torneo(id);
++      const p = t.partidos.find((p) => p.id === partidoId);
++      if (!p) throw new ErrorDelClub("PARTIDO_NO_ENCONTRADO", "No existe el partido", 404);
++      if (t.estado !== "en_juego") throw new ErrorDelClub("TORNEO_NO_EN_JUEGO", "El torneo no está en juego");
++      if (p.estado === "descanso" || p.parejas.includes(null)) throw new ErrorDelClub("PARTIDO_NO_LISTO", "El partido no está listo");
++      if (p.inicio! > estado.ahora) throw new ErrorDelClub("PARTIDO_NO_EMPEZADO", "El partido no ha empezado");
++      if (typeof datos.ganadora !== "string" || !p.parejas.includes(datos.ganadora) ||
++        (datos.marcador !== undefined && typeof datos.marcador !== "string")) invalido("Resultado inválido");
++      if (siguiente(t.partidos, p).partido?.estado === "jugado") throw new ErrorDelClub("RESULTADO_CERRADO", "La siguiente ronda ya se jugó");
++      p.ganadora = datos.ganadora;
++      p.marcador = datos.marcador as string | undefined ?? null;
++      p.estado = "jugado";
++      avanzar(t.partidos, p);
++      if (!siguiente(t.partidos, p).partido) { t.estado = "terminado"; t.campeona = p.ganadora; }
++      return { partido: p };
++    },
++
++    cancelarTorneo(id: string, quien?: Socio) {
++      permiso(quien);
++      const t = torneo(id);
++      if (t.estado === "terminado") throw new ErrorDelClub("TORNEO_TERMINADO", "El torneo ya terminó");
++      if (t.estado === "cancelado") throw new ErrorDelClub("YA_CANCELADO", "El torneo ya estaba cancelado");
++      t.estado = "cancelado";
++      return { torneo: t };
++    },
++
+     listarPistas() {
+       return { pistas: estado.pistas };
+     },
+@@ -80,10 +249,12 @@ export function crearClub(estado: Estado) {
+           estado: p.estado,
+           franjas: HORAS.map((hora) => {
+             const inicio = `${fecha}T${hora}`;
++            const t = bloqueo(p.id, inicio);
+             return {
+               inicio,
+               fin: finDeFranja(inicio),
+-              estado: p.estado === "cerrada" ? "cerrada" : ocupada(p.id, inicio) ? "reservada" : "libre",
++              ...(t ? { torneoId: t.id } : {}),
++              estado: t ? "torneo" : p.estado === "cerrada" ? "cerrada" : ocupada(p.id, inicio) ? "reservada" : "libre",
+               precio: precio(p, inicio),
+             };
+           }),
+@@ -140,7 +311,7 @@ export function crearClub(estado: Estado) {
+       if (!socio.cuotaActiva) throw new ErrorDelClub("CUOTA_INACTIVA", `${socio.nombre} no tiene la cuota al día`);
+       if (p.estado === "cerrada") throw new ErrorDelClub("PISTA_CERRADA", `${p.nombre} está cerrada`);
+       if ((inicio as string) <= estado.ahora) throw new ErrorDelClub("FRANJA_PASADA", "Esa franja ya ha empezado o ha pasado");
+-      if (ocupada(p.id, inicio as string)) throw new ErrorDelClub("FRANJA_NO_DISPONIBLE", "Esa franja ya está reservada");
++      if (ocupada(p.id, inicio as string) || bloqueo(p.id, inicio as string)) throw new ErrorDelClub("FRANJA_NO_DISPONIBLE", "Esa franja ya está reservada");
+       const futuras = estado.reservas.filter((r) => r.socioId === socio.id && r.estado === "confirmada" && r.inicio > estado.ahora);
+       if (futuras.length >= MAXIMO_RESERVAS_FUTURAS) {
+         throw new ErrorDelClub("LIMITE_DE_RESERVAS", `${socio.nombre} ya tiene ${MAXIMO_RESERVAS_FUTURAS} reservas futuras`);
+diff --git a/src/semilla.ts b/src/semilla.ts
+index bc45cc7..5f6341e 100644
+--- a/src/semilla.ts
++++ b/src/semilla.ts
+@@ -158,5 +158,5 @@ export function crearSemilla(): Estado {
+   socios.push({ id: "socio-041", nombre: "Nora Benítez", email: "nora.benitez@example.com", cuotaActiva: true, rol: "socio" });
+ 
+   reservas.sort((a, b) => (a.inicio === b.inicio ? a.pistaId.localeCompare(b.pistaId) : a.inicio.localeCompare(b.inicio)));
+-  return { ahora: AHORA, pistas: PISTAS.map((p) => ({ ...p })), socios, reservas, registro: [], contador };
++  return { ahora: AHORA, pistas: PISTAS.map((p) => ({ ...p })), socios, reservas, torneos: [], registro: [], contador };
+ }
+diff --git a/src/servidor.ts b/src/servidor.ts
+index a6a7764..a9d4d43 100644
+--- a/src/servidor.ts
++++ b/src/servidor.ts
+@@ -44,14 +44,47 @@ function identificar(req: IncomingMessage): Socio | undefined {
+ 
+ type Operacion = { nombre: string; argumentos: unknown; ejecutar: () => unknown };
+ 
+-// `quien` es el socio que hace la petición (cabecera X-Socio). Las operaciones actuales no lo usan.
+-async function resolver(req: IncomingMessage, url: URL, _quien: Socio | undefined): Promise<Operacion> {
++// `quien` es el socio que hace la petición (cabecera X-Socio).
++async function resolver(req: IncomingMessage, url: URL, quien: Socio | undefined): Promise<Operacion> {
+   const metodo = req.method ?? "GET";
+   const partes = url.pathname.split("/").filter(Boolean);
+   const q = url.searchParams;
+   if (partes[0] !== "api") throw new ErrorDelClub("RUTA_NO_ENCONTRADA", `No existe ${url.pathname}`, 404);
+   const [, recurso, id, accion] = partes;
+ 
++  if (recurso === "torneos") {
++    if (!id && metodo === "GET" && partes.length === 2) {
++      const filtro = q.get("estado") ?? undefined;
++      return { nombre: "listarTorneos", argumentos: { estado: filtro }, ejecutar: () => club.listarTorneos(filtro) };
++    }
++    if (!id && metodo === "POST" && partes.length === 2) {
++      const cuerpo = await leerCuerpo(req);
++      return { nombre: "crearTorneo", argumentos: cuerpo, ejecutar: () => club.crearTorneo(cuerpo, quien) };
++    }
++    if (id && !accion && metodo === "GET") {
++      return { nombre: "obtenerTorneo", argumentos: { id }, ejecutar: () => club.obtenerTorneo(id) };
++    }
++    if (id && metodo === "POST") {
++      const cuerpo = await leerCuerpo(req);
++      const argumentos = { id, ...cuerpo };
++      if (accion === "inscripciones" && partes.length === 4) {
++        return { nombre: "inscribirPareja", argumentos, ejecutar: () => club.inscribirPareja(id, cuerpo.socios, quien) };
++      }
++      if (accion === "inscripciones" && partes.length === 6 && partes[5] === "baja") {
++        return { nombre: "bajaPareja", argumentos: { ...argumentos, inscripcionId: partes[4] }, ejecutar: () => club.bajaPareja(id, partes[4]!, quien) };
++      }
++      if (accion === "cerrar" && partes.length === 4) {
++        return { nombre: "cerrarTorneo", argumentos, ejecutar: () => club.cerrarTorneo(id, quien) };
++      }
++      if (accion === "cancelar" && partes.length === 4) {
++        return { nombre: "cancelarTorneo", argumentos, ejecutar: () => club.cancelarTorneo(id, quien) };
++      }
++      if (accion === "partidos" && partes.length === 6 && partes[5] === "resultado") {
++        return { nombre: "resultadoPartido", argumentos: { ...argumentos, partidoId: partes[4] }, ejecutar: () => club.resultadoPartido(id, partes[4]!, cuerpo, quien) };
++      }
++    }
++  }
++
+   if (recurso === "pistas" && !id && metodo === "GET") {
+     return { nombre: "listarPistas", argumentos: {}, ejecutar: () => club.listarPistas() };
+   }
+@@ -131,11 +164,11 @@ const servidor = createServer(async (req, res) => {
+     operacion = await resolver(req, url, quien);
+     const resultado = operacion.ejecutar();
+     anotar(true);
+-    responder(operacion.nombre === "crearReserva" ? 201 : 200, resultado);
++    responder(["crearReserva", "crearTorneo", "inscribirPareja"].includes(operacion.nombre) ? 201 : 200, resultado);
+   } catch (error) {
+     if (error instanceof ErrorDelClub) {
+       anotar(false, error.codigo);
+-      responder(error.http, { error: { codigo: error.codigo, mensaje: error.message } });
++      responder(error.http, { error: { codigo: error.codigo, mensaje: error.message, ...(error.conflictos ? { conflictos: error.conflictos } : {}) } });
+     } else {
+       anotar(false, "ERROR_INTERNO");
+       console.error(error);
+diff --git a/src/tipos.ts b/src/tipos.ts
+index 41e5915..2f4c934 100644
+--- a/src/tipos.ts
++++ b/src/tipos.ts
+@@ -47,6 +47,41 @@ export interface Estado {
+   pistas: Pista[];
+   socios: Socio[];
+   reservas: Reserva[];
++  torneos: Torneo[];
+   registro: EntradaRegistro[];
+   contador: number;
+ }
++
++export interface Inscripcion {
++  id: string;
++  socios: [string, string];
++  estado: "inscrita" | "baja";
++  importe: number;
++}
++
++export interface Partido {
++  id: string;
++  ronda: number;
++  numero: number;
++  parejas: [string | null, string | null];
++  estado: "pendiente" | "jugado" | "descanso";
++  ganadora: string | null;
++  marcador: string | null;
++  pistaId: string | null;
++  inicio: string | null;
++}
++
++export interface Torneo {
++  id: string;
++  nombre: string;
++  pistas: string[];
++  franjas: string[];
++  plazas: number;
++  cuota: number;
++  estado: "inscripcion" | "en_juego" | "terminado" | "cancelado";
++  inscripciones: Inscripcion[];
++  partidos: Partido[];
++  campeona: string | null;
++}
++
++export type Conflicto = { pistaId: string; inicio: string } & ({ reservaId: string } | { torneoId: string });
+diff --git a/test/torneos.test.ts b/test/torneos.test.ts
+new file mode 100644
+index 0000000..d5b6bc0
+--- /dev/null
++++ b/test/torneos.test.ts
+@@ -0,0 +1,240 @@
++import assert from "node:assert/strict";
++import { test, type TestContext } from "node:test";
++import { arrancarApi, type Api, type Respuesta } from "./ayuda.ts";
++import type { Torneo } from "../src/tipos.ts";
++
++const gestor = "socio-040";
++const inicio = "2026-12-01T09:00";
++const datos = { nombre: "Copa del club", pistas: ["pista-2", "pista-1"],
++  franjas: [inicio, "2026-12-01T10:30", "2026-12-01T12:00", "2026-12-01T13:30"], plazas: 8, cuota: 1500 };
++async function preparar(t: TestContext) {
++  const api = await arrancarApi();
++  t.after(() => api.cerrar());
++  return api;
++}
++function error(r: Respuesta, codigo: string, status = 409) {
++  assert.equal(r.status, status, r.texto);
++  assert.equal(r.cuerpo.error.codigo, codigo);
++}
++async function crear(api: Api, cambios = {}): Promise<Torneo> {
++  const r = await api.pedir("POST", "/api/torneos", { socio: gestor, cuerpo: { ...datos, ...cambios } });
++  assert.equal(r.status, 201, r.texto);
++  return r.cuerpo.torneo;
++}
++async function inscribir(api: Api, id: string, n: number) {
++  const ids = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 34, 35];
++  for (let i = 0; i < n; i++) {
++    const socios = ids.slice(i * 2, i * 2 + 2).map((id) => `socio-${String(id).padStart(3, "0")}`);
++    const r = await api.pedir("POST", `/api/torneos/${id}/inscripciones`, { socio: socios[0], cuerpo: { socios } });
++    assert.equal(r.status, 201, r.texto);
++    assert.equal(r.cuerpo.inscripcion.importe, datos.cuota);
++    assert.equal(r.cuerpo.inscripcion.estado, "inscrita");
++  }
++}
++async function reloj(api: Api, ahora: string) {
++  assert.equal((await api.pedir("POST", "/_reloj", { cuerpo: { ahora } })).status, 200);
++}
++async function obtener(api: Api, id: string): Promise<Torneo> {
++  return (await api.pedir("GET", `/api/torneos/${id}`)).cuerpo.torneo;
++}
++
++test("permisos de gestores y parejas; consultas públicas y recursos inexistentes", async (t) => {
++  const api = await preparar(t);
++  for (const socio of [undefined, "socio-001"]) {
++    error(await api.pedir("POST", "/api/torneos", { socio, cuerpo: datos }), socio ? "SIN_PERMISO" : "NO_IDENTIFICADO", socio ? 403 : 401);
++  }
++  const torneo = await crear(api);
++  const base = `/api/torneos/${torneo.id}`;
++  await inscribir(api, torneo.id, 2);
++  const i = (await obtener(api, torneo.id)).inscripciones[0]!;
++  for (const ruta of ["cerrar", "cancelar", "partidos/no/resultado", `inscripciones/${i.id}/baja`, "inscripciones"]) {
++    for (const socio of [undefined, "socio-030"]) {
++      error(await api.pedir("POST", `${base}/${ruta}`, { socio, cuerpo: { socios: ["socio-001", "socio-002"] } }), socio ? "SIN_PERMISO" : "NO_IDENTIFICADO", socio ? 403 : 401);
++    }
++  }
++  assert.equal((await api.pedir("GET", base)).status, 200);
++  assert.equal((await api.pedir("GET", "/api/torneos")).status, 200);
++  for (const [metodo, sufijo] of [["GET", ""], ["POST", "/cerrar"], ["POST", "/cancelar"], ["POST", "/inscripciones"], ["POST", "/inscripciones/no/baja"], ["POST", "/partidos/no/resultado"]]) {
++    error(await api.pedir(metodo!, `/api/torneos/no${sufijo}`, { socio: gestor }), "TORNEO_NO_ENCONTRADO", 404);
++  }
++  error(await api.pedir("POST", `${base}/inscripciones/no/baja`, { socio: gestor }), "INSCRIPCION_NO_ENCONTRADA", 404);
++  error(await api.pedir("POST", `${base}/partidos/no/resultado`, { socio: gestor }), "PARTIDO_NO_ENCONTRADO", 404);
++  // El otro miembro de la pareja también puede darla de baja.
++  assert.equal((await api.pedir("POST", `${base}/inscripciones/${i.id}/baja`, { socio: "socio-002" })).status, 200);
++});
++
++test("validación del torneo, conflictos completos y creación sin efectos al fallar", async (t) => {
++  const api = await preparar(t);
++  for (const cambio of [{ nombre: " " }, { nombre: 3 }, { pistas: [] }, { pistas: ["pista-1", "pista-1"] },
++    { franjas: [] }, { franjas: [inicio, inicio] }, { plazas: 3 }, { plazas: 17 }, { plazas: 4.5 }, { cuota: -1 }, { cuota: 1.5 }]) {
++    error(await api.pedir("POST", "/api/torneos", { socio: gestor, cuerpo: { ...datos, ...cambio } }), "DATOS_INVALIDOS", 400);
++  }
++  for (const [cambio, codigo, status] of [
++    [{ pistas: ["no"] }, "PISTA_NO_ENCONTRADA", 404], [{ pistas: ["pista-4"] }, "PISTA_CERRADA", 409],
++    [{ franjas: ["2026-12-01T09:01"] }, "FRANJA_INVALIDA", 400], [{ franjas: ["2026-02-30T09:00"] }, "FRANJA_INVALIDA", 400],
++    [{ franjas: ["2026-11-18T09:00"] }, "FRANJA_PASADA", 409], [{ franjas: ["2026-11-18T10:00"] }, "FRANJA_INVALIDA", 400],
++  ] as const) error(await api.pedir("POST", "/api/torneos", { socio: gestor, cuerpo: { ...datos, ...cambio } }), codigo, status);
++  await reloj(api, "2026-11-18T10:30");
++  error(await api.pedir("POST", "/api/torneos", { socio: gestor, cuerpo: { ...datos, franjas: ["2026-11-18T10:30"] } }), "FRANJA_PASADA");
++  assert.deepEqual((await api.pedir("GET", "/api/torneos")).cuerpo.torneos, []);
++  const reserva = (await api.pedir("POST", "/api/reservas", { cuerpo: { socioId: "socio-041", pistaId: "pista-1", inicio } })).cuerpo.reserva;
++  const torneo = await crear(api, { pistas: ["pista-2"], franjas: [inicio] });
++  const conflicto = await api.pedir("POST", "/api/torneos", { socio: gestor, cuerpo: datos });
++  error(conflicto, "FRANJAS_OCUPADAS");
++  assert.deepEqual(conflicto.cuerpo.error.conflictos, [
++    { pistaId: "pista-2", inicio, torneoId: torneo.id }, { pistaId: "pista-1", inicio, reservaId: reserva.id },
++  ]);
++  assert.equal((await api.pedir("GET", "/api/torneos")).cuerpo.torneos.length, 1);
++});
++
++test("crear, listar, filtrar, bloquear y cancelar torneos", async (t) => {
++  const api = await preparar(t);
++  const tarde = await crear(api, { franjas: ["2026-12-02T09:00"] });
++  const torneo = await crear(api, { franjas: [...datos.franjas].reverse() });
++  assert.equal(torneo.estado, "inscripcion");
++  assert.deepEqual(torneo.franjas, datos.franjas);
++  assert.deepEqual(torneo.inscripciones, []);
++  assert.deepEqual(torneo.partidos, []);
++  assert.equal(torneo.campeona, null);
++  await inscribir(api, torneo.id, 1);
++  const lista = (await api.pedir("GET", "/api/torneos")).cuerpo.torneos;
++  assert.deepEqual(lista.map((t: Torneo) => t.id), [torneo.id, tarde.id]);
++  assert.deepEqual(lista[0], { id: torneo.id, nombre: datos.nombre, estado: "inscripcion", plazas: 8, cuota: 1500, inscritas: 1 });
++  error(await api.pedir("GET", "/api/torneos?estado=no"), "DATOS_INVALIDOS", 400);
++  const disponibilidad = (await api.pedir("GET", "/api/disponibilidad?fecha=2026-12-01")).cuerpo;
++  for (const pistaId of datos.pistas) for (const f of disponibilidad.pistas.find((p: any) => p.pistaId === pistaId).franjas.filter((f: any) => datos.franjas.includes(f.inicio))) {
++    assert.equal(f.estado, "torneo"); assert.equal(f.torneoId, torneo.id);
++    error(await api.pedir("POST", "/api/reservas", { cuerpo: { socioId: "socio-041", pistaId, inicio: f.inicio } }), "FRANJA_NO_DISPONIBLE");
++  }
++  const cancelar = await api.pedir("POST", `/api/torneos/${torneo.id}/cancelar`, { socio: gestor });
++  assert.equal(cancelar.cuerpo.torneo.estado, "cancelado");
++  error(await api.pedir("POST", `/api/torneos/${torneo.id}/cancelar`, { socio: gestor }), "YA_CANCELADO");
++  assert.equal((await api.pedir("GET", "/api/torneos?estado=cancelado")).cuerpo.torneos.length, 1);
++  assert.equal((await api.pedir("GET", "/api/torneos")).cuerpo.torneos.length, 2);
++  assert.equal((await api.pedir("POST", "/api/reservas", { cuerpo: { socioId: "socio-041", pistaId: "pista-1", inicio } })).status, 201);
++  await crear(api, { pistas: ["pista-2"] });
++});
++
++test("inscripciones: datos, cuotas, duplicados, capacidad, bajas y límite exacto de 48 horas", async (t) => {
++  const api = await preparar(t);
++  const torneo = await crear(api, { plazas: 4 });
++  const ruta = `/api/torneos/${torneo.id}/inscripciones`;
++  for (const socios of [null, [], ["socio-001"], ["socio-001", "socio-001"], [1, 2], ["a", "b", "c"]]) {
++    error(await api.pedir("POST", ruta, { socio: gestor, cuerpo: { socios } }), "DATOS_INVALIDOS", 400);
++  }
++  for (const [socios, codigo, status] of [
++    [["socio-001", "no"], "SOCIO_NO_ENCONTRADO", 404], [["socio-001", "socio-011"], "CUOTA_INACTIVA", 409],
++  ] as const) error(await api.pedir("POST", ruta, { socio: gestor, cuerpo: { socios } }), codigo, status);
++  await inscribir(api, torneo.id, 4);
++  error(await api.pedir("POST", ruta, { socio: gestor, cuerpo: { socios: ["socio-001", "socio-010"] } }), "YA_INSCRITO");
++  error(await api.pedir("POST", ruta, { socio: gestor, cuerpo: { socios: ["socio-009", "socio-010"] } }), "TORNEO_COMPLETO");
++  const i = (await obtener(api, torneo.id)).inscripciones[0]!;
++  await reloj(api, "2026-11-29T09:00");
++  assert.equal((await api.pedir("POST", `${ruta}/${i.id}/baja`, { socio: gestor })).cuerpo.inscripcion.estado, "baja");
++  error(await api.pedir("POST", `${ruta}/${i.id}/baja`, { socio: gestor }), "YA_DE_BAJA");
++  assert.equal((await api.pedir("POST", ruta, { socio: "socio-002", cuerpo: { socios: i.socios } })).status, 201);
++  const actual = await obtener(api, torneo.id);
++  assert.equal(actual.inscripciones.length, 5);
++  assert.equal(actual.inscripciones[0]!.estado, "baja");
++  await reloj(api, "2026-11-29T09:01");
++  error(await api.pedir("POST", ruta, { socio: gestor, cuerpo: { socios: ["socio-009", "socio-010"] } }), "INSCRIPCION_CERRADA");
++  error(await api.pedir("POST", `${ruta}/${actual.inscripciones[4]!.id}/baja`, { socio: gestor }), "INSCRIPCION_CERRADA");
++});
++
++test("cierre atómico, franjas pasadas y errores por estado", async (t) => {
++  const api = await preparar(t);
++  const torneo = await crear(api, { pistas: ["pista-1"], franjas: [inicio] });
++  const ruta = `/api/torneos/${torneo.id}`;
++  error(await api.pedir("POST", `${ruta}/cerrar`, { socio: gestor }), "PAREJAS_INSUFICIENTES");
++  await inscribir(api, torneo.id, 3);
++  const antes = await obtener(api, torneo.id);
++  error(await api.pedir("POST", `${ruta}/cerrar`, { socio: gestor }), "FRANJAS_INSUFICIENTES");
++  assert.deepEqual(await obtener(api, torneo.id), antes);
++  const dos = await crear(api, { pistas: ["pista-3"] });
++  await inscribir(api, dos.id, 2);
++  await reloj(api, inicio);
++  const cerrada = await api.pedir("POST", `/api/torneos/${dos.id}/cerrar`, { socio: gestor });
++  assert.equal(cerrada.cuerpo.torneo.partidos[0].inicio, "2026-12-01T10:30");
++  error(await api.pedir("POST", `/api/torneos/${dos.id}/cerrar`, { socio: gestor }), "TORNEO_NO_EN_INSCRIPCION");
++  error(await api.pedir("POST", `/api/torneos/${dos.id}/inscripciones`, { socio: gestor, cuerpo: { socios: ["socio-005", "socio-006"] } }), "INSCRIPCION_CERRADA");
++  error(await api.pedir("POST", `/api/torneos/${dos.id}/inscripciones/${cerrada.cuerpo.torneo.inscripciones[0].id}/baja`, { socio: gestor }), "INSCRIPCION_CERRADA");
++  await reloj(api, "2026-12-02T09:00");
++  error(await api.pedir("POST", `${ruta}/cerrar`, { socio: gestor }), "FRANJAS_INSUFICIENTES");
++  assert.equal((await api.pedir("POST", `/api/torneos/${dos.id}/cancelar`, { socio: gestor })).cuerpo.torneo.estado, "cancelado");
++  const libre = (await api.pedir("GET", "/api/disponibilidad?fecha=2026-12-01&pista=pista-3")).cuerpo.pistas[0].franjas;
++  assert.ok(libre.every((f: any) => f.estado === "libre"));
++  error(await api.pedir("POST", `/api/torneos/${dos.id}/partidos/${cerrada.cuerpo.torneo.partidos[0].id}/resultado`, { socio: gestor, cuerpo: { ganadora: "no" } }), "TORNEO_NO_EN_JUEGO");
++});
++
++test("cuadro de cinco parejas, calendario, sobrantes, resultados y campeona", async (t) => {
++  const api = await preparar(t);
++  const torneo = await crear(api);
++  const base = `/api/torneos/${torneo.id}`;
++  await inscribir(api, torneo.id, 5);
++  const totalReservas = (await api.pedir("GET", "/api/reservas")).cuerpo.total;
++  const cierre = await api.pedir("POST", `${base}/cerrar`, { socio: gestor });
++  assert.equal(cierre.status, 200, cierre.texto);
++  const cuadro: Torneo = cierre.cuerpo.torneo;
++  const ids = cuadro.inscripciones.map((i) => i.id);
++  assert.deepEqual(cuadro.partidos.map((p) => [p.ronda, p.numero, p.parejas, p.estado, p.ganadora, p.pistaId, p.inicio]), [
++    [1, 1, [ids[0], null], "descanso", ids[0], null, null],
++    [1, 2, [ids[1], null], "descanso", ids[1], null, null],
++    [1, 3, [ids[2], null], "descanso", ids[2], null, null],
++    [1, 4, [ids[3], ids[4]], "pendiente", null, "pista-2", inicio],
++    [2, 1, [ids[0], null], "pendiente", null, "pista-2", "2026-12-01T10:30"],
++    [2, 2, [ids[1], ids[2]], "pendiente", null, "pista-1", inicio],
++    [3, 1, [null, null], "pendiente", null, "pista-2", "2026-12-01T12:00"],
++  ]);
++  const partidos = cuadro.partidos;
++  const resultado = (n: number, ganadora: unknown, marcador?: unknown) => api.pedir("POST", `${base}/partidos/${partidos[n]!.id}/resultado`, { socio: gestor, cuerpo: { ganadora, ...(marcador === undefined ? {} : { marcador }) } });
++  error(await resultado(0, ids[0]), "PARTIDO_NO_LISTO");
++  error(await resultado(4, ids[0]), "PARTIDO_NO_LISTO");
++  error(await resultado(3, ids[3]), "PARTIDO_NO_EMPEZADO");
++  assert.equal((await api.pedir("GET", "/api/reservas")).cuerpo.total, totalReservas);
++  // Las franjas sobrantes se liberan; los jugadores conservan su límite habitual.
++  await reloj(api, "2026-11-30T09:00");
++  for (const hora of ["10:30", "12:00", "13:30"]) {
++    assert.equal((await api.pedir("POST", "/api/reservas", { cuerpo: { socioId: "socio-002", pistaId: "pista-1", inicio: `2026-12-01T${hora}` } })).status, 201);
++  }
++  await reloj(api, "2026-12-01T12:00");
++  error(await resultado(3, "no"), "DATOS_INVALIDOS", 400);
++  error(await resultado(3, null), "DATOS_INVALIDOS", 400);
++  error(await resultado(3, ids[3], 123), "DATOS_INVALIDOS", 400);
++  const jugado = await resultado(3, ids[3], "6-4 6-3");
++  assert.equal(jugado.cuerpo.partido.estado, "jugado");
++  assert.equal(jugado.cuerpo.partido.marcador, "6-4 6-3");
++  assert.equal((await obtener(api, torneo.id)).partidos[4]!.parejas[1], ids[3]);
++  assert.equal((await resultado(3, ids[4])).cuerpo.partido.marcador, null);
++  assert.equal((await obtener(api, torneo.id)).partidos[4]!.parejas[1], ids[4]);
++  assert.equal((await resultado(4, ids[4])).status, 200);
++  error(await resultado(3, ids[3]), "RESULTADO_CERRADO");
++  assert.equal((await resultado(5, ids[1])).status, 200);
++  assert.deepEqual((await obtener(api, torneo.id)).partidos[6]!.parejas, [ids[4], ids[1]]);
++  assert.equal((await resultado(6, ids[4])).status, 200);
++  const final = await obtener(api, torneo.id);
++  assert.equal(final.estado, "terminado"); assert.equal(final.campeona, ids[4]);
++  error(await resultado(6, ids[1]), "TORNEO_NO_EN_JUEGO");
++  error(await api.pedir("POST", `${base}/cancelar`, { socio: gestor }), "TORNEO_TERMINADO");
++});
++
++test("dos parejas juegan directamente la final y dieciséis forman cuatro rondas", async (t) => {
++  const api = await preparar(t);
++  const dos = await crear(api, { pistas: ["pista-1"] });
++  await inscribir(api, dos.id, 2);
++  const cierre = await api.pedir("POST", `/api/torneos/${dos.id}/cerrar`, { socio: gestor });
++  assert.equal(cierre.cuerpo.torneo.partidos.length, 1);
++  const p = cierre.cuerpo.torneo.partidos[0];
++  await reloj(api, inicio);
++  assert.equal((await api.pedir("POST", `/api/torneos/${dos.id}/partidos/${p.id}/resultado`, { socio: gestor, cuerpo: { ganadora: p.parejas[0] } })).status, 200);
++  assert.equal((await obtener(api, dos.id)).campeona, p.parejas[0]);
++  await reloj(api, "2026-11-18T10:00");
++  const grande = await crear(api, { plazas: 16, pistas: ["pista-2", "pista-3"],
++    franjas: ["2026-12-02T09:00", "2026-12-02T10:30", "2026-12-02T12:00", "2026-12-02T13:30", "2026-12-02T15:00", "2026-12-02T16:30", "2026-12-02T18:00", "2026-12-02T19:30"] });
++  await inscribir(api, grande.id, 16);
++  const r = await api.pedir("POST", `/api/torneos/${grande.id}/cerrar`, { socio: gestor });
++  assert.equal(r.status, 200, r.texto);
++  const cuadro: Torneo = r.cuerpo.torneo;
++  assert.deepEqual([1, 2, 3, 4].map((r) => cuadro.partidos.filter((p) => p.ronda === r).length), [8, 4, 2, 1]);
++  assert.equal(new Set(cuadro.partidos.map((p) => `${p.pistaId}|${p.inicio}`)).size, 15);
++  assert.deepEqual(cuadro.partidos[0]!.parejas, [cuadro.inscripciones[0]!.id, cuadro.inscripciones[15]!.id]);
++});

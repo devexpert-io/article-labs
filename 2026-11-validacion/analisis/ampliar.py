@@ -2,9 +2,9 @@
 de B y el de C de cada cadena del lote completo, más la base y la implementación de referencia. Corre en la misma caja que
 el corrector y, como él, repite una vez los tests que fallan (cuenta como pasado si pasa en alguna de las dos).
 
-Uso: python3 -I ampliar.py <encargo> <ampliados.test.ts> <salida.json>
+Uso: python3 -I ampliar.py <encargo> <ampliados.test.ts> <salida.json>   (LOTE=grande para otro lote; completo por defecto)
 """
-import json, shutil, subprocess, sys, tempfile
+import json, os, shutil, subprocess, sys, tempfile
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 sys.path.insert(0, "/home/antonio/Projects/devexpert-io/article-labs/2026-11-validacion/runner")
@@ -12,7 +12,7 @@ from agentes import LAB, SCR
 from calificar import OCULTOS, copiar_estado, ejecutar_en_caja, leer_tap
 
 encargo, prueba, salida = sys.argv[1], Path(sys.argv[2]).resolve(), Path(sys.argv[3])
-EJ = SCR / "ejecuciones" / "completo"
+EJ = SCR / "ejecuciones" / os.environ.get("LOTE", "completo")
 estados = [("base", LAB / "club", None), ("referencia", LAB / "referencias" / encargo, None)]
 for c in sorted(EJ.glob(f"{encargo}-*-r*")):
     for nombre, sub in (("A", "impl"), ("B", "B"), ("C", "C")):

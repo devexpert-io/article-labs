@@ -1,12 +1,15 @@
 """Un paquete por encargo con los hallazgos de cada veredicto revise o block sobre un estado que los tests ocultos dan
-por completo, con la carpeta y el commit del estado que se validó."""
+por completo, con la carpeta y el commit del estado que se validó.
+
+Uso: python3 -I analisis/revision/paquetes.py <carpeta-de-salida> [<lote>]   (el lote, "completo" por defecto)"""
 import json, glob, sys
 from collections import Counter
 from pathlib import Path
-EJ = "/var/tmp/lab-validacion/ejecuciones/completo"
+LOTE = sys.argv[2] if len(sys.argv) > 2 else "completo"
+EJ = f"/var/tmp/lab-validacion/ejecuciones/{LOTE}"
 salida = Path(sys.argv[1]); salida.mkdir(exist_ok=True)
 por_encargo = {}
-for f in sorted(glob.glob('/home/antonio/Projects/devexpert-io/article-labs/2026-11-validacion/resultados/completo/*.json')):
+for f in sorted(glob.glob(f'/home/antonio/Projects/devexpert-io/article-labs/2026-11-validacion/resultados/{LOTE}/*.json')):
     r = json.load(open(f))
     vals = []
     if r.get("D"):

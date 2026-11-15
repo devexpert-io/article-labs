@@ -1,10 +1,11 @@
-import json, glob
+import json, glob, sys
 from collections import Counter, defaultdict
 D = str(__import__("pathlib").Path(__file__).resolve().parent)
+SUF = sys.argv[1] if len(sys.argv) > 1 else ""   # "-grande" para el tramo de encargos grandes
 paq, rev = {}, {}
-for f in glob.glob(f"{D}/paquetes/*.json"):
+for f in glob.glob(f"{D}/paquetes{SUF}/*.json"):
     for h in json.load(open(f)): paq[h["id"]] = h
-for f in glob.glob(f"{D}/clasificacion/*.json"):
+for f in glob.glob(f"{D}/clasificacion{SUF}/*.json"):
     for h in json.load(open(f)): rev[h["id"]] = h
 print("paquete", len(paq), "revisados", len(rev), "sin revisar", len(set(paq) - set(rev)), "de más", len(set(rev) - set(paq)))
 print("categorías:", Counter(r["categoria"] for r in rev.values()))

@@ -23,10 +23,11 @@ PRECIOS = {
 }
 ORDEN = ["opus", "sol", "haiku", "luna", "deepseek"]
 DIFICILES = {"duraciones", "reservas-fijas", "facturas"}
+GRANDES = {"torneos", "partidos-abiertos"}
 
 
 def dificultad(encargo: str) -> str:
-    return "dificil" if encargo in DIFICILES else "normal"
+    return "grande" if encargo in GRANDES else "dificil" if encargo in DIFICILES else "normal"
 
 
 def coste(m: dict | None) -> float | None:
@@ -117,7 +118,8 @@ def analizar(lotes: list[str]) -> dict:
             }
             cadenas.append(fila)
     tabla = {}
-    for dif in ("normal", "dificil", "todas"):
+    presentes = {c["dificultad"] for c in cadenas}
+    for dif in [d for d in ("normal", "dificil", "grande") if d in presentes] + ["todas"]:
         por_config = defaultdict(list)
         for c in cadenas:
             if dif == "todas" or c["dificultad"] == dif:
