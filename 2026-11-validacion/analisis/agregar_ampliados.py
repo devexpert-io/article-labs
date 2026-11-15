@@ -32,7 +32,7 @@ for f in sorted((LAB / "resultados" / LOTE).glob("*.json")):
     if r.get("C"):
         fila["C"], fila["C_fallan"] = ok("C", r["C"]["final"])
     filas.append(fila)
-json.dump(filas, open(D / "ampliados" / f"agregado-{SOLO}.json", "w"), ensure_ascii=False, indent=1)
+json.dump(filas, open(D / "ampliados" / f"agregado-{SOLO}{'' if LOTE == 'completo' else '-' + LOTE}.json", "w"), ensure_ascii=False, indent=1)
 print("vara:", SOLO)
 for dif in [d for d in ("normal", "dificil", "grande") if any(x["dif"] == d for x in filas)] + ["todas"]:
     print(f"\n## {dif}")

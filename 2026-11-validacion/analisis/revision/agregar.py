@@ -47,4 +47,4 @@ for i, r in rev.items():
         impl_con[h["implementa"]].add(h["cadena"])
 for k in ["opus","sol","haiku","luna","deepseek"]:
     print(f"implementaciones de {k} con algún defecto real marcado en su primera validación: {len(impl_con[k])} -> {sorted(impl_con[k])}")
-json.dump({"raiz": list(raiz)}, open(f"{D}/agregado.json", "w"))
+json.dump({"raiz": list(raiz)}, open(f"{D}/agregado{SUF}.json", "w"))
