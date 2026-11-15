@@ -8,7 +8,7 @@
 | sol | 6 | 6 | 6 | 0/0 | 1.99 $ | — | —/— | — |
 | haiku | 6 | 5 | 6 | 1/0 | 3.58 $ | 6 | 1/0 | 6.61 $ |
 | luna | 6 | 0 | 2 | 2/0 | 0.18 $ | 3 | 3/0 | 3.79 $ |
-| deepseek | 6 | 6 | 6 | 0/0 | 1.51 $ | — | —/— | — |
+| deepseek | 6 | 6 | 6 | 0/0 | 0.45 $ | — | —/— | — |
 
 Lo que cuesta validar (B y C, con sus reparaciones):
 
@@ -20,7 +20,7 @@ Lo que cuesta validar (B y C, con sus reparaciones):
 | haiku | C | 6.61 $ | 464 % | 21 | 6.61 $ | no | 1/5 | 1 | 0 |
 | luna | B | 0.18 $ | 210 % | 35 | 0.09 $ | sí | 0/0 | 0 | 0 |
 | luna | C | 3.79 $ | 4379 % | 87 | 1.26 $ | sí | 0/0 | 0 | 0 |
-| deepseek | B | 1.51 $ | 99 % | 64 | — | no | 0/6 | 0 | 0 |
+| deepseek | B | 0.45 $ | 116 % | 64 | — | no | 0/6 | 0 | 0 |
 
 Detección (primera validación):
 
@@ -42,7 +42,7 @@ Detección (primera validación):
 | sol | 6 | 6 | 6 | 0/0 | 1.99 $ | — | —/— | — |
 | haiku | 6 | 5 | 6 | 1/0 | 3.58 $ | 6 | 1/0 | 6.61 $ |
 | luna | 6 | 0 | 2 | 2/0 | 0.18 $ | 3 | 3/0 | 3.79 $ |
-| deepseek | 6 | 6 | 6 | 0/0 | 1.51 $ | — | —/— | — |
+| deepseek | 6 | 6 | 6 | 0/0 | 0.45 $ | — | —/— | — |
 
 Lo que cuesta validar (B y C, con sus reparaciones):
 
@@ -54,7 +54,7 @@ Lo que cuesta validar (B y C, con sus reparaciones):
 | haiku | C | 6.61 $ | 464 % | 21 | 6.61 $ | no | 1/5 | 1 | 0 |
 | luna | B | 0.18 $ | 210 % | 35 | 0.09 $ | sí | 0/0 | 0 | 0 |
 | luna | C | 3.79 $ | 4379 % | 87 | 1.26 $ | sí | 0/0 | 0 | 0 |
-| deepseek | B | 1.51 $ | 99 % | 64 | — | no | 0/6 | 0 | 0 |
+| deepseek | B | 0.45 $ | 116 % | 64 | — | no | 0/6 | 0 | 0 |
 
 Detección (primera validación):
 

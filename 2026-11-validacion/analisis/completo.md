@@ -8,7 +8,7 @@
 | sol | 8 | 8 | 8 | 0/0 | 1.12 $ | — | —/— | — |
 | haiku | 8 | 8 | 8 | 0/0 | 0.56 $ | 8 | 0/0 | 3.99 $ |
 | luna | 8 | 8 | 8 | 0/0 | 0.13 $ | 8 | 0/0 | 2.33 $ |
-| deepseek | 8 | 8 | 8 | 0/0 | 0.77 $ | — | —/— | — |
+| deepseek | 8 | 8 | 8 | 0/0 | 0.39 $ | — | —/— | — |
 
 Lo que cuesta validar (B y C, con sus reparaciones):
 
@@ -20,7 +20,7 @@ Lo que cuesta validar (B y C, con sus reparaciones):
 | haiku | C | 3.99 $ | 1012 % | 11 | — | no | 1/8 | 1 | 0 |
 | luna | B | 0.13 $ | 166 % | 25 | — | no | 5/8 | 9 | 0 |
 | luna | C | 2.33 $ | 2880 % | 51 | — | no | 7/8 | 9 | 0 |
-| deepseek | B | 0.77 $ | 124 % | 56 | — | no | 1/8 | 1 | 0 |
+| deepseek | B | 0.39 $ | 191 % | 56 | — | no | 1/8 | 1 | 0 |
 
 Detección (primera validación):
 
@@ -47,7 +47,7 @@ La misma sesión (D, solo detecta):
 | sol | 0.80 $ | 2/8 |
 | haiku | 0.46 $ | 2/8 |
 | luna | 0.04 $ | 4/8 |
-| deepseek | 0.92 $ | 0/8 |
+| deepseek | 0.21 $ | 0/8 |
 
 ## Encargos: dificil
 
@@ -57,7 +57,7 @@ La misma sesión (D, solo detecta):
 | sol | 9 | 9 | 9 | 0/0 | 1.94 $ | — | —/— | — |
 | haiku | 9 | 9 | 9 | 0/0 | 0.60 $ | 9 | 0/0 | 6.05 $ |
 | luna | 9 | 6 | 6 | 0/0 | 0.14 $ | 9 | 3/0 | 3.10 $ |
-| deepseek | 9 | 9 | 9 | 0/0 | 1.54 $ | — | —/— | — |
+| deepseek | 9 | 9 | 9 | 0/0 | 0.55 $ | — | —/— | — |
 
 Lo que cuesta validar (B y C, con sus reparaciones):
 
@@ -69,7 +69,7 @@ Lo que cuesta validar (B y C, con sus reparaciones):
 | haiku | C | 6.05 $ | 763 % | 19 | — | no | 4/9 | 4 | 1 |
 | luna | B | 0.14 $ | 180 % | 25 | — | no | 4/6 | 6 | 0 |
 | luna | C | 3.10 $ | 3932 % | 68 | 1.03 $ | sí | 6/6 | 8 | 0 |
-| deepseek | B | 1.54 $ | 142 % | 76 | — | no | 4/9 | 5 | 0 |
+| deepseek | B | 0.55 $ | 186 % | 76 | — | no | 4/9 | 5 | 0 |
 
 Detección (primera validación):
 
@@ -96,7 +96,7 @@ La misma sesión (D, solo detecta):
 | sol | 1.24 $ | 4/9 |
 | haiku | 0.92 $ | 8/9 |
 | luna | 0.04 $ | 3/6 |
-| deepseek | 1.13 $ | 2/9 |
+| deepseek | 0.30 $ | 2/9 |
 
 ## Encargos: todas
 
@@ -106,7 +106,7 @@ La misma sesión (D, solo detecta):
 | sol | 17 | 17 | 17 | 0/0 | 3.06 $ | — | —/— | — |
 | haiku | 17 | 17 | 17 | 0/0 | 1.15 $ | 17 | 0/0 | 10.04 $ |
 | luna | 17 | 14 | 14 | 0/0 | 0.28 $ | 17 | 3/0 | 5.43 $ |
-| deepseek | 17 | 17 | 17 | 0/0 | 2.31 $ | — | —/— | — |
+| deepseek | 17 | 17 | 17 | 0/0 | 0.94 $ | — | —/— | — |
 
 Lo que cuesta validar (B y C, con sus reparaciones):
 
@@ -118,7 +118,7 @@ Lo que cuesta validar (B y C, con sus reparaciones):
 | haiku | C | 10.04 $ | 846 % | 29 | — | no | 5/17 | 5 | 1 |
 | luna | B | 0.28 $ | 173 % | 50 | — | no | 9/14 | 15 | 0 |
 | luna | C | 5.43 $ | 3399 % | 118 | 1.81 $ | sí | 13/14 | 17 | 0 |
-| deepseek | B | 2.31 $ | 135 % | 132 | — | no | 5/17 | 6 | 0 |
+| deepseek | B | 0.94 $ | 188 % | 132 | — | no | 5/17 | 6 | 0 |
 
 Detección (primera validación):
 
@@ -145,7 +145,7 @@ La misma sesión (D, solo detecta):
 | sol | 2.05 $ | 6/17 |
 | haiku | 1.38 $ | 10/17 |
 | luna | 0.08 $ | 7/14 |
-| deepseek | 2.06 $ | 2/17 |
+| deepseek | 0.51 $ | 2/17 |
 
 ## Cadenas
 

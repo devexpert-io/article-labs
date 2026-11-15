@@ -34,9 +34,11 @@ Siete encargos, cada uno con su spec y entre 9 y 13 criterios de aceptación. So
 | `sol` | Codex CLI 0.169.0 | gpt-6.1-sol, razonamiento medio | frontera |
 | `haiku` | Claude Code 2.1.325 | Haiku 5.5 | barato |
 | `luna` | Codex CLI 0.169.0 | gpt-6-luna, razonamiento medio | barato |
-| `deepseek` | OpenCode 2.3.0 | DeepSeek V4 Flash (NaN Builders) | barato |
+| `deepseek` | OpenCode 2.3.0 | DeepSeek V4.1 Flash 1017 (NaN Builders) | barato |
 
 Cada agente se ejecuta sin la configuración de su usuario (ni instrucciones globales, ni skills, ni MCP) y dentro de una caja que solo le deja escribir en su carpeta de trabajo (ver "Aislamiento").
+
+NaN Builders sirve DeepSeek con el nombre `deepseek-v4-flash`, pero el modelo es la V4.1 Flash 1017. Su panel de uso lo llama así, y la API de DeepSeek también atiende ese nombre con la 1017 (ver sus [precios](https://api-docs.deepseek.com/quick_start/pricing)). La ficha pública de NaN todavía habla de 305B, el tamaño de la V4 Flash, y la 4.1 tiene 763B. A 15 de noviembre de 2026, la 1017 es la última versión de DeepSeek.
 
 ### Las condiciones
 
@@ -151,7 +153,7 @@ Antes hay que preparar `$LAB_SCRATCH/codex-home` (un `config.toml` mínimo y tu 
 
 ## Resultados
 
-Lote `completo`, del 14 de noviembre a las 23:06 al 15 a la 1:57: 85 cadenas, ninguna cortada por cuota, red o autenticación. Claude Code no cambió de versión en ninguna de sus 171 ejecuciones (2.1.325). El coste total, a precio de API, fue de 61,81 $ (Claude 42,32 $, Codex 13,41 $ y OpenCode 6,08 $). Las tablas completas, por dificultad y cadena a cadena, están en `analisis/completo.md`.
+Lote `completo`, del 14 de noviembre a las 23:06 al 15 a la 1:57: 85 cadenas, ninguna cortada por cuota, red o autenticación. Claude Code no cambió de versión en ninguna de sus 171 ejecuciones (2.1.325). El coste total, a precio de API, fue de 57,69 $ (Claude 42,32 $, Codex 13,41 $ y OpenCode 1,96 $). Las tablas completas, por dificultad y cadena a cadena, están en `analisis/completo.md`.
 
 ### Encargos completos
 
@@ -181,12 +183,12 @@ Con la regla fijada antes de ver los datos, compensa en una sola combinación: e
 | `sol` | 0,14 $ | 3,06 $ (+130 %) | — |
 | `haiku` | 0,07 $ | 1,15 $ (+97 %) | 10,04 $ (+846 %) |
 | `luna` | 0,009 $ | 0,28 $ (+173 %) | 5,43 $ (+3.399 %) |
-| `deepseek` | 0,10 $ | 2,31 $ (+135 %) | — |
+| `deepseek` | 0,03 $ | 0,94 $ (+188 %) | — |
 
 El coste extra es lo que cuesta validar y reparar en los 17 encargos, y el porcentaje, sobre lo que costó implementarlos.
 
 - Luna con el validador potente costó 5,59 $ por los 17 encargos y los dejó todos completos. Sol solo costó 2,35 $, con los 17 completos a la primera. Y Haiku solo, 1,19 $, también con los 17 completos.
-- Validar en la misma sesión (D) sale más barato o más caro según el modelo. Con Opus cuesta 0,31 $ por validación, frente a 0,48 $ en una sesión limpia. Con Haiku y DeepSeek sale más caro (0,08 $ frente a 0,02 $, y 0,12 $ frente a 0,08 $). Con Sol y Luna cuesta casi lo mismo. La sesión reanudada arrastra todo el contexto de la implementación: a Opus se lo abarata la caché, y DeepSeek, que en nuestra tabla de precios no tiene descuento por caché, lo paga entero.
+- Validar en la misma sesión (D) sale más barato o más caro según el modelo. Con Opus cuesta 0,31 $ por validación, frente a 0,48 $ en una sesión limpia, y con DeepSeek, 0,03 $ frente a 0,04 $. Con Haiku sale más caro (0,08 $ frente a 0,02 $). Con Sol y Luna cuesta casi lo mismo. La sesión reanudada arrastra todo el contexto de la implementación, y a Opus y a DeepSeek se lo abarata la caché.
 
 ### Peticiones de cambio en trabajo completo
 
@@ -267,8 +269,8 @@ Lo que cuesta llegar a esos resultados, en los 17 encargos y con los defectos ma
 | Luna sola | 0,16 $ | 10 |
 | Luna y su validador | 0,44 $ | 9 |
 | Luna y Sol validando | 5,59 $ | 17 |
-| DeepSeek solo | 1,71 $ | 13 |
-| DeepSeek y su validador | 4,02 $ | 14 |
+| DeepSeek solo | 0,50 $ | 13 |
+| DeepSeek y su validador | 1,44 $ | 14 |
 
 Las matrices de cada encargo (estado por test) están en `analisis/ampliados/`.
 
@@ -292,7 +294,7 @@ Las matrices de cada encargo (estado por test) están en `analisis/ampliados/`.
 
 ## Resultados del tramo de encargos grandes
 
-Lote `grande`, el 15 de noviembre de 14:41 a 16:23: 30 cadenas, ninguna cortada por cuota, red o autenticación. Los agentes siguieron en las mismas versiones. El coste total, a precio de API, fue de 35,65 $ (Claude 25,20 $, Codex 7,42 $ y OpenCode 3,03 $). Las tablas completas están en `analisis/grande.md`. Del piloto (`resultados/piloto-grande/`, solo A) salieron completas 9 de las 10 implementaciones, en entre 3 y 10 minutos.
+Lote `grande`, el 15 de noviembre de 14:41 a 16:23: 30 cadenas, ninguna cortada por cuota, red o autenticación. Los agentes siguieron en las mismas versiones. El coste total, a precio de API, fue de 33,47 $ (Claude 25,20 $, Codex 7,42 $ y OpenCode 0,85 $). Las tablas completas están en `analisis/grande.md`. Del piloto (`resultados/piloto-grande/`, solo A) salieron completas 9 de las 10 implementaciones, en entre 3 y 10 minutos.
 
 ### Encargos completos
 
@@ -323,10 +325,10 @@ Lote `grande`, el 15 de noviembre de 14:41 a 16:23: 30 cadenas, ninguna cortada 
 | Luna sola | 0,09 $ | 0 |
 | Luna y su validador | 0,27 $ | 2 |
 | Luna y Sol validando | 3,88 $ | 3 |
-| DeepSeek solo | 1,52 $ | 6 |
-| DeepSeek y su validador | 3,03 $ | 6 |
+| DeepSeek solo | 0,39 $ | 6 |
+| DeepSeek y su validador | 0,85 $ | 6 |
 
-Validar y reparar con el mismo modelo costó, sobre lo que costó implementar, un 64 % más con Opus, un 146 % con Sol, un 252 % con Haiku, un 210 % con Luna y un 99 % con DeepSeek. El validador de Haiku pidió cambios en las cinco implementaciones que ya estaban completas y alargó el trabajo 100 minutos en total.
+Validar y reparar con el mismo modelo costó, sobre lo que costó implementar, un 64 % más con Opus, un 146 % con Sol, un 252 % con Haiku, un 210 % con Luna y un 116 % con DeepSeek. El validador de Haiku pidió cambios en las cinco implementaciones que ya estaban completas y alargó el trabajo 100 minutos en total.
 
 ### Otras cosas que pasaron
 

@@ -14,12 +14,15 @@ LAB = Path(__file__).resolve().parents[1]
 # Claude Code da el suyo (total_cost_usd). Comprobados el 14-nov-2026:
 # - OpenAI, developers.openai.com/api/docs/pricing (estándar, contexto corto). Codex no separa las escrituras
 #   de caché, así que se cobran como entrada normal.
-# - DeepSeek V4 Flash: OpenRouter con DeepInfra (openrouter.ai/deepseek/deepseek-v4-flash), sin descuento por
-#   caché. En el laboratorio se usó a través de NaN Builders, con suscripción.
+# - DeepSeek V4.1 Flash 1017: api-docs.deepseek.com/quick_start/pricing, comprobado el 15-nov-2026. Es la tarifa
+#   base (la de OpenRouter con el proveedor DeepSeek). En horas punta (01:00-04:00 y 06:00-10:00 UTC, de lunes a
+#   viernes) cuesta el doble, y eso cambia los dólares pero no los porcentajes. En el laboratorio se usó a través de
+#   NaN Builders, con suscripción y con el nombre deepseek-v4-flash, que en NaN es la versión 4.1-1017 (su panel de
+#   uso la llama así) y que la API de DeepSeek también atiende con la 1017.
 PRECIOS = {
     "gpt-6.1-sol": {"entrada": 2.00, "cache": 0.10, "salida": 10.00},
     "gpt-6-luna": {"entrada": 0.10, "cache": 0.01, "salida": 0.50},
-    "nan/deepseek-v4-flash": {"entrada": 0.09, "cache": 0.09, "salida": 0.18},
+    "nan/deepseek-v4-flash": {"entrada": 0.15, "cache": 0.003, "salida": 0.60},
 }
 ORDEN = ["opus", "sol", "haiku", "luna", "deepseek"]
 DIFICILES = {"duraciones", "reservas-fijas", "facturas"}

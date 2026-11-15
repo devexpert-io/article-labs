@@ -3,7 +3,7 @@
 Cada configuración es un agente con un modelo:
 - opus y haiku: Claude Code con Opus 5.5 y Haiku 5.5.
 - sol y luna: Codex con gpt-6.1-sol y gpt-6-luna, razonamiento medio.
-- deepseek: OpenCode 2 con DeepSeek V4 Flash alojado en NaN Builders.
+- deepseek: OpenCode 2 con DeepSeek V4.1 Flash 1017, que NaN Builders sirve con el nombre deepseek-v4-flash.
 """
 import contextlib
 import json
