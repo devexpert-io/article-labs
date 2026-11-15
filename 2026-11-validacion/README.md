@@ -5,6 +5,8 @@ Experimento del artículo de DevExpert sobre cómo validar el trabajo de un agen
 > **Estado:** diseño fijado el 14 de noviembre de 2026, antes de lanzar el lote completo. Esta sección no se toca después de ver los datos. Los resultados irán en su propia sección.
 >
 > **Resultados:** el lote completo terminó el 15 de noviembre. Ver [Resultados](#resultados).
+>
+> **Tramo de encargos grandes:** diseño fijado el 15 de noviembre antes de ejecutarlo, y ejecutado ese mismo día. Ver [Resultados del tramo de encargos grandes](#resultados-del-tramo-de-encargos-grandes).
 
 ## Diseño
 
@@ -287,6 +289,87 @@ Las matrices de cada encargo (estado por test) están en `analisis/ampliados/`.
 - Los fallos que ven los tests ocultos están concentrados. Los cinco criterios que fallaron son de un solo encargo, y cuatro son el mismo punto.
 - La vara ampliada se escribió después de ver los datos y sale de lo que encontraron los validadores: un defecto que no vio ningún validador ni ningún revisor no está. La revisión y los tests ampliados los hizo Claude Opus 5.5, el mismo modelo que valida en `opus` y en la C de `haiku`. Para que eso pese lo menos posible, cada defecto se comprobó con una prueba contra el estado y contra la base. Dónde va la línea entre defectos mayores y menores es decisión nuestra, y por eso damos las dos versiones.
 - El criterio 8 se presta a confusión. La spec dice que una serie lleva los ids de sus reservas y que solo `GET /api/series/:id` las trae completas, pero el criterio dice que el POST responde "con la serie, sus `reservas` y sus `saltadas`". Quien lee la spec entera lo resuelve, y 11 de las 15 implementaciones lo hicieron bien.
+
+## Resultados del tramo de encargos grandes
+
+Lote `grande`, el 15 de noviembre de 14:41 a 16:23: 30 cadenas, ninguna cortada por cuota, red o autenticación. Los agentes siguieron en las mismas versiones. El coste total, a precio de API, fue de 35,65 $ (Claude 25,20 $, Codex 7,42 $ y OpenCode 3,03 $). Las tablas completas están en `analisis/grande.md`. Del piloto (`resultados/piloto-grande/`, solo A) salieron completas 9 de las 10 implementaciones, en entre 3 y 10 minutos.
+
+### Encargos completos
+
+| Config | Nivel | Sin validador (A) | Al final de B | Al final de C | Minutos por implementación |
+|---|---|---|---|---|---|
+| `opus` | frontera | 6 de 6 | 6 | — | 4,9 |
+| `sol` | frontera | 6 de 6 | 6 | — | 5,0 |
+| `haiku` | barato | 5 de 6 | 6 | 6 | 5,9 |
+| `luna` | barato | 0 de 6 | 2 | 3 | 3,1 |
+| `deepseek` | barato | 6 de 6 | 6 | — | 7,9 |
+
+- **Aun con 21 y 25 criterios, los agentes terminaron en minutos.** No son trabajos largos: lo que mide este tramo son features del doble de tamaño.
+- **Haiku:** la única incompleta (`partidos-abiertos-haiku-r3`, al README le faltaban los errores nuevos) la arreglaron su validador y Opus.
+- **Luna:** en `partidos-abiertos` falla un criterio en cada implementación: la cancelación automática en r2 y r3, que arreglan los dos validadores, y el README en r1, que no arregla ninguno. En `torneos` falla entre 10 y 14 criterios. Su propio validador deja r1 en 5 fallos, no mueve r2 y deja r3 en 8. Sol validándola deja r1 y r2 a falta solo del README, y r3, completa.
+- **¿Compensa?** Con la regla fijada antes, compensa en Luna con su propio validador (arregla 2) y con Sol (arregla 3). En Haiku, los dos arreglan 1, que no llega. En Opus, Sol y DeepSeek no había nada que arreglar.
+
+### Lo que cuesta
+
+| Con qué | Coste de los 6 encargos | Completos |
+|---|---|---|
+| Opus solo | 8,29 $ | 6 |
+| Opus y su validador | 13,55 $ | 6 |
+| Sol solo | 1,36 $ | 6 |
+| Sol y su validador | 3,36 $ | 6 |
+| Haiku solo | 1,42 $ | 5 |
+| Haiku y su validador | 5,00 $ | 6 |
+| Haiku y Opus validando | 8,03 $ | 6 |
+| Luna sola | 0,09 $ | 0 |
+| Luna y su validador | 0,27 $ | 2 |
+| Luna y Sol validando | 3,88 $ | 3 |
+| DeepSeek solo | 1,52 $ | 6 |
+| DeepSeek y su validador | 3,03 $ | 6 |
+
+Validar y reparar con el mismo modelo costó, sobre lo que costó implementar, un 64 % más con Opus, un 146 % con Sol, un 252 % con Haiku, un 210 % con Luna y un 99 % con DeepSeek. El validador de Haiku pidió cambios en las cinco implementaciones que ya estaban completas y alargó el trabajo 100 minutos en total.
+
+### Otras cosas que pasaron
+
+- **Aceptado con fallos dentro:** en `partidos-abiertos-luna-r1`, el validador de Luna (B, ronda 2) y Sol (C, ronda 3) aceptaron con el README incompleto (criterio 21).
+- **Reparaciones que estropean por el camino:** en cuatro cadenas, una reparación rompió criterios que estaban bien (`torneos-haiku-r2` y `torneos-luna-r1` en B, `torneos-luna-r2` en B y `torneos-luna-r3` en C, con cinco a la vez). Las rondas siguientes los arreglaron, así que no se ven en los estados finales.
+- **Dos gates rotos por la carga:** `torneos-deepseek-r3` y `torneos-haiku-r2` dieron el gate en rojo al corregir la implementación, con la API de sus propios tests muerta por una señal. Corregidos otra vez tres veces con la máquina en reposo, pasan siempre. Ningún agente del tramo dio por terminado su trabajo con el gate en rojo.
+- **Un validador sin veredicto:** Haiku, en la tercera validación de `partidos-abiertos-haiku-r3` (B).
+
+### Peticiones de cambio en trabajo completo y vara ampliada
+
+Los validadores pidieron cambios 20 veces sobre estados que los tests ocultos daban por completos, con 54 hallazgos. Los revisaron dos revisores (Claude Opus 5.5, uno por encargo) con las mismas instrucciones que en el lote completo (`analisis/revision/clasificacion-grande/`).
+
+| Categoría | Hallazgos |
+|---|---|
+| Defecto | 5 (9 %) |
+| De más | 27 (50 %) |
+| Previo | 12 (22 %) |
+| Ambigua | 6 (11 %) |
+| Error | 4 (7 %) |
+
+- **Los 5 defectos son 5 fallos distintos, todos de gravedad baja:** dos del README, dos de comportamiento y un criterio sin test. Cuatro se arreglaron.
+- **Los validadores de Opus y Sol no encontraron ningún defecto real:** pidieron cambios una vez y tres veces, sin nada dentro. El de Haiku pidió cambios 11 veces, 3 con algún defecto.
+- **Las 6 ambiguas** son los dos puntos de `partidos-abiertos` con dos lecturas: si quien sale tarde de un partido que se cancela solo conserva su penalización (en 31 de los 36 estados la conserva) y si quitar el nivel sin `X-Socio` da 401 o 403.
+- **Decisiones de la revisión.** En `torneos`, aceptar franjas con fechas que no existen (11 de las 15 implementaciones) cuenta como `previo`, igual que en `reservas-fijas`, porque la spec usa la misma frase y la base las acepta. En `partidos-abiertos`, el filtro `fecha` es nuevo y la spec pide 400 para "una fecha que no vale", así que aceptar el 30 de febrero ahí cuenta como defecto.
+
+Los tests ampliados (`ocultos-ampliados/torneos.test.ts` y `partidos-abiertos.test.ts`) son 4, y los 4 son menores por la regla de `gravedad.json`:
+
+- **`torneos` X1:** una franja con una fecha que no existe no da 500. Falla en `torneos-deepseek-r1`, en A y en B, porque su validador aceptó.
+- **`partidos-abiertos` X1:** el filtro `fecha` rechaza una fecha que no existe. Falla en A en las tres de Opus, dos de Haiku, las tres de Luna y una de DeepSeek. Lo arreglan los validadores de Haiku y de Luna y Sol validando a Luna. El de Opus y el de DeepSeek aceptaron con el fallo dentro, y Opus validando a Haiku no lo arregló.
+- **`partidos-abiertos` X2:** la disponibilidad responde como la base a una fecha que no existe. Solo falló en un estado intermedio de `partidos-abiertos-luna-r2` (B), que la reparación siguiente deshizo.
+- **`partidos-abiertos` X3:** crear un partido sin `inicio` da el 400 de reservar. Falla en las tres de Luna, y lo arreglan su validador en una y Sol en las tres.
+
+Encargos completos de 6, con la regla de "compensa" igual que antes:
+
+| Config | Mayores: A | B | C | ¿Compensa? | Todos: A | B | C | ¿Compensa? |
+|---|---|---|---|---|---|---|---|---|
+| `opus` | 6 | 6 | — | no | 3 | 3 | — | no |
+| `sol` | 6 | 6 | — | no | 6 | 6 | — | no |
+| `haiku` | 5 | 6 | 6 | no | 4 | 6 | 4 | B |
+| `luna` | 0 | 2 | 3 | B y C | 0 | 0 | 3 | C |
+| `deepseek` | 6 | 6 | — | no | 4 | 4 | — | no |
+
+Con los mayores no cambia nada respecto a los tests ocultos: en este tramo no apareció ningún defecto mayor que se les escapara. Cinco reparaciones de Haiku en B editaron la propia spec, tres en `torneos` y dos en `partidos-abiertos`. Las de `torneos-haiku-r1`, `torneos-haiku-r2` y `partidos-abiertos-haiku-r1` se deshicieron en la ronda siguiente. Las de `torneos-haiku-r3` (cuatro criterios reescritos) y `partidos-abiertos-haiku-r3` (la spec marcada como implementada) siguen en el estado final.
 
 ## Límites
 
