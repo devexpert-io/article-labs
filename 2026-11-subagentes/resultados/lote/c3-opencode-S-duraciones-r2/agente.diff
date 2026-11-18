@@ -1,0 +1,539 @@
+diff --git a/README.md b/README.md
+index 256e5c2..6447945 100644
+--- a/README.md
++++ b/README.md
+@@ -15,7 +15,8 @@ En el club siempre es miércoles 18 de noviembre de 2026 a las 10:00, salvo que
+ - **Importes:** en céntimos de euro, como enteros.
+ - **Fechas y horas:** las locales del club (Europe/Madrid), como texto: `AAAA-MM-DD` y `AAAA-MM-DDTHH:MM`.
+ - **Franjas:** de 90 minutos, que empiezan a las 09:00, 10:30, 12:00, 13:30, 15:00, 16:30, 18:00, 19:30 y 21:00.
+-- **Precios:** cada pista tiene precio de valle y de punta. Es punta a partir de las 18:00 y todo el fin de semana.
++- **Duración de las reservas:** 60, 90 o 120 minutos (90 por defecto). Empiezan en punto o y media, no antes de las 09:00, y tienen que terminar como muy tarde a las 22:30.
++- **Precios:** cada pista tiene precio de valle y de punta por su franja de 90 minutos. Es punta a partir de las 18:00 y todo el fin de semana. El importe de una reserva se calcula por minutos: cada minuto vale el precio de la franja de 90 minutos de esa pista dividido entre 90; los minutos de lunes a viernes antes de las 18:00 van a precio de valle y el resto a punta, y el total se redondea al céntimo más cercano (medio céntimo, hacia arriba).
+ - **Identidad:** la cabecera `X-Socio` lleva el id del socio que hace la petición. Es opcional. Si lleva un id que no existe, la API responde `401 NO_IDENTIFICADO`. Los socios tienen rol `socio` o `gestor`. En la semilla, el único gestor es `socio-040` (la recepción del club).
+ - **Errores:** `{"error": {"codigo": "…", "mensaje": "…"}}` con su código HTTP: 400 si los datos no valen, 401 si no se sabe quién llama, 403 si no tiene permiso, 404 si algo no existe y 409 si lo impide una regla del club.
+ 
+@@ -24,6 +25,7 @@ En el club siempre es miércoles 18 de noviembre de 2026 a las 10:00, salvo que
+ - Para reservar hay que tener la cuota al día (`cuotaActiva`).
+ - Cada socio puede tener como máximo 3 reservas futuras confirmadas.
+ - No se reservan pistas cerradas ni franjas que ya han empezado.
++- Una reserva no puede solaparse con ninguna reserva confirmada de la misma pista (que una termine justo cuando empieza otra no es solaparse). Las reservas canceladas no ocupan la pista.
+ - Cancelar es gratis hasta 24 horas antes. Después, solo con `forzar: true`, y se cobra una penalización del 100 % del importe.
+ 
+ ## API
+@@ -35,7 +37,7 @@ En el club siempre es miércoles 18 de noviembre de 2026 a las 10:00, salvo que
+ 
+ ### Disponibilidad
+ 
+-- `GET /api/disponibilidad?fecha=AAAA-MM-DD[&pista=<id>]`: las franjas de ese día por pista, cada una con `inicio`, `fin`, `estado` (`libre`, `reservada` o `cerrada`) y `precio`.
++- `GET /api/disponibilidad?fecha=AAAA-MM-DD[&pista=<id>]`: las franjas de ese día por pista, cada una con `inicio`, `fin`, `estado` (`libre`, `reservada` o `cerrada`) y `precio`. Una franja está `reservada` si cualquier reserva confirmada de esa pista se solapa con ella, aunque sea en parte. Cada pista incluye además `huecos`: los intervalos libres más largos posibles entre las 09:00 y las 22:30, cada uno con `inicio` y `fin`, ordenados por hora y sin tener en cuenta la hora actual. Una pista cerrada no tiene huecos.
+ 
+ ### Socios
+ 
+@@ -45,10 +47,10 @@ En el club siempre es miércoles 18 de noviembre de 2026 a las 10:00, salvo que
+ 
+ - `GET /api/reservas`: lista reservas con filtros opcionales `fecha`, `desde`, `hasta` (por día de inicio, ambos incluidos), `socio`, `pista` y `estado` (`confirmada`, `cancelada` o `no_presentada`), paginada con `limite` (1 a 100, 50 por defecto) y `pagina`. Responde `{ total, pagina, paginas, reservas }`.
+ - `GET /api/reservas/:id`: una reserva. Responde `{ reserva }`.
+-- `POST /api/reservas` con `{ socioId, pistaId, inicio, notas? }`: crea una reserva. Responde `201 { reserva }`. Errores: `SOCIO_NO_ENCONTRADO`, `PISTA_NO_ENCONTRADA`, `FRANJA_INVALIDA`, `CUOTA_INACTIVA`, `PISTA_CERRADA`, `FRANJA_PASADA`, `FRANJA_NO_DISPONIBLE` y `LIMITE_DE_RESERVAS`.
++- `POST /api/reservas` con `{ socioId, pistaId, inicio, duracion?, notas? }`: crea una reserva de `duracion` minutos (`60`, `90` o `120`; `90` si no se indica). Responde `201 { reserva }`. Errores: `SOCIO_NO_ENCONTRADO`, `PISTA_NO_ENCONTRADA`, `DURACION_INVALIDA`, `FRANJA_INVALIDA`, `CUOTA_INACTIVA`, `PISTA_CERRADA`, `FRANJA_PASADA`, `FRANJA_NO_DISPONIBLE` y `LIMITE_DE_RESERVAS`.
+ - `POST /api/reservas/:id/cancelar` con `{ forzar?, motivo? }`: cancela una reserva. Responde `{ reserva }`. Errores: `RESERVA_NO_ENCONTRADA`, `YA_CANCELADA`, `RESERVA_PASADA` y `FUERA_DE_PLAZO`.
+ 
+-Una reserva tiene `id`, `socioId`, `pistaId`, `inicio`, `fin`, `estado`, `importe`, `notas` y, si se canceló, `penalizacion` y `motivoCancelacion`.
++Una reserva tiene `id`, `socioId`, `pistaId`, `inicio`, `fin`, `duracion`, `estado`, `importe`, `notas` y, si se canceló, `penalizacion` y `motivoCancelacion`.
+ 
+ ### Solo para pruebas
+ 
+diff --git a/src/nucleo.ts b/src/nucleo.ts
+index 62ed37b..b443a27 100644
+--- a/src/nucleo.ts
++++ b/src/nucleo.ts
+@@ -1,5 +1,5 @@
+ // Las operaciones del club y sus reglas. La API HTTP (src/servidor.ts) es la única que las llama.
+-import { finDeFranja, HORAS, precio } from "./semilla.ts";
++import { finDeFranja, horaDeMinutos, HORAS, minutosDelDia, precio, precioPorMinutos } from "./semilla.ts";
+ import type { Estado, EstadoReserva, Reserva } from "./tipos.ts";
+ 
+ export class ErrorDelClub extends Error {
+@@ -18,6 +18,9 @@ export const LIMITE_MAXIMO = 100;
+ export const LIMITE_POR_DEFECTO = 50;
+ export const MAXIMO_RESERVAS_FUTURAS = 3;
+ export const HORAS_CANCELACION_GRATUITA = 24;
++// El club abre a las 09:00 y la última reserva termina como muy tarde a las 22:30.
++const APERTURA_MINUTOS = 9 * 60;
++const CIERRE_MINUTOS = 22 * 60 + 30;
+ 
+ function invalido(mensaje: string): never {
+   throw new ErrorDelClub("DATOS_INVALIDOS", mensaje, 400);
+@@ -53,8 +56,35 @@ export function crearClub(estado: Estado) {
+     if (!encontrada) throw new ErrorDelClub("RESERVA_NO_ENCONTRADA", `No existe la reserva ${id}`, 404);
+     return encontrada;
+   };
+-  const ocupada = (pistaId: string, inicio: string) =>
+-    estado.reservas.some((r) => r.pistaId === pistaId && r.inicio === inicio && r.estado === "confirmada");
++  const solapa = (pistaId: string, inicio: string, fin: string) =>
++    estado.reservas.some((r) => r.pistaId === pistaId && r.estado === "confirmada" && r.inicio < fin && r.fin > inicio);
++
++  /** Intervalos libres más largos posibles entre las 09:00 y las 22:30 del día, sin contar la hora actual. */
++  const huecosDe = (pistaId: string, fecha: string): { inicio: string; fin: string }[] => {
++    const inicioDia = `${fecha}T09:00`;
++    const finDia = `${fecha}T22:30`;
++    const ocupados = estado.reservas
++      .filter((r) => r.pistaId === pistaId && r.estado === "confirmada" && r.fin > inicioDia && r.inicio < finDia)
++      .map((r) => ({ inicio: r.inicio < inicioDia ? inicioDia : r.inicio, fin: r.fin > finDia ? finDia : r.fin }))
++      .sort((a, b) => (a.inicio < b.inicio ? -1 : a.inicio > b.inicio ? 1 : 0));
++    const fusionados: { inicio: string; fin: string }[] = [];
++    for (const o of ocupados) {
++      const ultimo = fusionados[fusionados.length - 1];
++      if (ultimo && o.inicio <= ultimo.fin) {
++        if (o.fin > ultimo.fin) ultimo.fin = o.fin;
++      } else {
++        fusionados.push({ ...o });
++      }
++    }
++    const huecos: { inicio: string; fin: string }[] = [];
++    let cursor = inicioDia;
++    for (const o of fusionados) {
++      if (cursor < o.inicio) huecos.push({ inicio: cursor, fin: o.inicio });
++      if (o.fin > cursor) cursor = o.fin;
++    }
++    if (cursor < finDia) huecos.push({ inicio: cursor, fin: finDia });
++    return huecos;
++  };
+ 
+   return {
+     listarPistas() {
+@@ -83,10 +113,11 @@ export function crearClub(estado: Estado) {
+             return {
+               inicio,
+               fin: finDeFranja(inicio),
+-              estado: p.estado === "cerrada" ? "cerrada" : ocupada(p.id, inicio) ? "reservada" : "libre",
++              estado: p.estado === "cerrada" ? "cerrada" : solapa(p.id, inicio, finDeFranja(inicio)) ? "reservada" : "libre",
+               precio: precio(p, inicio),
+             };
+           }),
++          huecos: p.estado === "cerrada" ? [] : huecosDe(p.id, fecha),
+         })),
+       };
+     },
+@@ -125,22 +156,36 @@ export function crearClub(estado: Estado) {
+       return { reserva: reserva(id) };
+     },
+ 
+-    crearReserva(datos: { socioId?: unknown; pistaId?: unknown; inicio?: unknown; notas?: unknown }) {
++    crearReserva(datos: { socioId?: unknown; pistaId?: unknown; inicio?: unknown; notas?: unknown; duracion?: unknown }) {
+       const { socioId, pistaId, inicio } = datos;
+       if (typeof socioId !== "string" || typeof pistaId !== "string" || typeof inicio !== "string") {
+         invalido("socioId, pistaId e inicio son obligatorios");
+       }
+       if (datos.notas !== undefined && typeof datos.notas !== "string") invalido("notas debe ser un texto");
++      const duracion = datos.duracion === undefined ? 90 : datos.duracion;
++      if (duracion !== 60 && duracion !== 90 && duracion !== 120) {
++        throw new ErrorDelClub("DURACION_INVALIDA", "duracion debe ser 60, 90 o 120 minutos", 400);
++      }
+       const socio = estado.socios.find((s) => s.id === socioId);
+       if (!socio) throw new ErrorDelClub("SOCIO_NO_ENCONTRADO", `No existe el socio ${socioId}`, 404);
+       const p = pista(pistaId as string);
+-      if (!FECHA_HORA.test(inicio as string) || !HORAS.includes((inicio as string).slice(11))) {
+-        throw new ErrorDelClub("FRANJA_INVALIDA", `inicio debe ser AAAA-MM-DDTHH:MM y empezar a una de estas horas: ${HORAS.join(", ")}`, 400);
++      if (!FECHA_HORA.test(inicio as string)) {
++        throw new ErrorDelClub("FRANJA_INVALIDA", "inicio debe tener el formato AAAA-MM-DDTHH:MM", 400);
++      }
++      const inicioMin = minutosDelDia((inicio as string).slice(11));
++      const finMin = inicioMin + duracion;
++      if (inicioMin % 30 !== 0 || inicioMin < APERTURA_MINUTOS || finMin > CIERRE_MINUTOS) {
++        throw new ErrorDelClub(
++          "FRANJA_INVALIDA",
++          "inicio debe empezar en punto o y media, no antes de las 09:00, y terminar como muy tarde a las 22:30",
++          400,
++        );
+       }
++      const fin = `${(inicio as string).slice(0, 10)}T${horaDeMinutos(finMin)}`;
+       if (!socio.cuotaActiva) throw new ErrorDelClub("CUOTA_INACTIVA", `${socio.nombre} no tiene la cuota al día`);
+       if (p.estado === "cerrada") throw new ErrorDelClub("PISTA_CERRADA", `${p.nombre} está cerrada`);
+       if ((inicio as string) <= estado.ahora) throw new ErrorDelClub("FRANJA_PASADA", "Esa franja ya ha empezado o ha pasado");
+-      if (ocupada(p.id, inicio as string)) throw new ErrorDelClub("FRANJA_NO_DISPONIBLE", "Esa franja ya está reservada");
++      if (solapa(p.id, inicio as string, fin)) throw new ErrorDelClub("FRANJA_NO_DISPONIBLE", "Esa franja ya está reservada");
+       const futuras = estado.reservas.filter((r) => r.socioId === socio.id && r.estado === "confirmada" && r.inicio > estado.ahora);
+       if (futuras.length >= MAXIMO_RESERVAS_FUTURAS) {
+         throw new ErrorDelClub("LIMITE_DE_RESERVAS", `${socio.nombre} ya tiene ${MAXIMO_RESERVAS_FUTURAS} reservas futuras`);
+@@ -151,9 +196,10 @@ export function crearClub(estado: Estado) {
+         socioId: socio.id,
+         pistaId: p.id,
+         inicio: inicio as string,
+-        fin: finDeFranja(inicio as string),
++        fin,
++        duracion,
+         estado: "confirmada",
+-        importe: precio(p, inicio as string),
++        importe: precioPorMinutos(p, inicio as string, duracion),
+         notas: (datos.notas as string | undefined) ?? "",
+       };
+       estado.reservas.push(nueva);
+diff --git a/src/semilla.ts b/src/semilla.ts
+index bc45cc7..b513876 100644
+--- a/src/semilla.ts
++++ b/src/semilla.ts
+@@ -43,11 +43,44 @@ export function precio(pista: Pista, inicio: string): number {
+ }
+ 
+ export function finDeFranja(inicio: string): string {
+-  const [h, m] = inicio.slice(11).split(":").map(Number);
+-  const total = h! * 60 + m! + MINUTOS_FRANJA;
++  return finDeDuracion(inicio, MINUTOS_FRANJA);
++}
++
++/** "HH:MM" → minutos desde medianoche. */
++export function minutosDelDia(hora: string): number {
++  const [h, m] = hora.split(":").map(Number);
++  return (h ?? 0) * 60 + (m ?? 0);
++}
++
++/** Minutos desde medianoche → "HH:MM". */
++export function horaDeMinutos(total: number): string {
+   const hh = String(Math.floor(total / 60)).padStart(2, "0");
+   const mm = String(total % 60).padStart(2, "0");
+-  return `${inicio.slice(0, 10)}T${hh}:${mm}`;
++  return `${hh}:${mm}`;
++}
++
++/** `inicio` más `duracion` minutos, en texto local del club. */
++export function finDeDuracion(inicio: string, duracion: number): string {
++  const total = minutosDelDia(inicio.slice(11)) + duracion;
++  return `${inicio.slice(0, 10)}T${horaDeMinutos(total)}`;
++}
++
++/**
++ * Precio de una reserva por minutos: cada minuto vale el precio de la franja de 90 minutos
++ * de esa pista dividido entre 90. Los minutos de lunes a viernes antes de las 18:00 van a
++ * precio de valle; los de las 18:00 en adelante y todos los del sábado y el domingo, a punta.
++ * El total se redondea al céntimo más cercano, y medio céntimo se redondea hacia arriba.
++ */
++export function precioPorMinutos(pista: Pista, inicio: string, duracion: number): number {
++  const finDeSemana = diaDeLaSemana(inicio.slice(0, 10)) === 0 || diaDeLaSemana(inicio.slice(0, 10)) === 6;
++  const inicioMin = minutosDelDia(inicio.slice(11));
++  let valle = 0;
++  let punta = 0;
++  for (let m = inicioMin; m < inicioMin + duracion; m++) {
++    if (finDeSemana || m >= 18 * 60) punta += 1;
++    else valle += 1;
++  }
++  return Math.round((valle * pista.precioValle + punta * pista.precioPunta) / MINUTOS_FRANJA);
+ }
+ 
+ function fechasEntre(desde: string, hasta: string): string[] {
+@@ -90,6 +123,7 @@ export function crearSemilla(): Estado {
+       pistaId,
+       inicio,
+       fin: finDeFranja(inicio),
++      duracion: MINUTOS_FRANJA,
+       estado,
+       importe: precio(pista, inicio),
+       notas,
+diff --git a/src/tipos.ts b/src/tipos.ts
+index 41e5915..d5df7ea 100644
+--- a/src/tipos.ts
++++ b/src/tipos.ts
+@@ -25,6 +25,8 @@ export interface Reserva {
+   pistaId: string;
+   inicio: string;
+   fin: string;
++  /** Duración en minutos: 60, 90 o 120. */
++  duracion: number;
+   estado: EstadoReserva;
+   /** Céntimos de euro. */
+   importe: number;
+diff --git a/test/duraciones.test.ts b/test/duraciones.test.ts
+new file mode 100644
+index 0000000..6d7c63e
+--- /dev/null
++++ b/test/duraciones.test.ts
+@@ -0,0 +1,290 @@
++// La feature de duraciones (60, 90 o 120 minutos), probada a través de la API.
++import assert from "node:assert/strict";
++import { test } from "node:test";
++import { arrancarApi, type Api } from "./ayuda.ts";
++
++async function conApi(fn: (api: Api) => Promise<void>): Promise<void> {
++  const api = await arrancarApi();
++  try {
++    await fn(api);
++  } finally {
++    api.cerrar();
++  }
++}
++
++test("duracion es opcional, vale 60, 90 o 120 y cualquier otro valor responde DURACION_INVALIDA", async () => {
++  await conApi(async (api) => {
++    const deSesenta = await api.pedir("POST", "/api/reservas", {
++      cuerpo: { socioId: "socio-041", pistaId: "pista-1", inicio: "2026-12-01T09:00", duracion: 60 },
++    });
++    assert.equal(deSesenta.status, 201);
++    assert.equal(deSesenta.cuerpo.reserva.duracion, 60);
++    assert.equal(deSesenta.cuerpo.reserva.fin, "2026-12-01T10:00");
++
++    const porDefecto = await api.pedir("POST", "/api/reservas", {
++      cuerpo: { socioId: "socio-041", pistaId: "pista-2", inicio: "2026-12-01T10:00" },
++    });
++    assert.equal(porDefecto.status, 201);
++    assert.equal(porDefecto.cuerpo.reserva.duracion, 90);
++
++    const deCientoVeinte = await api.pedir("POST", "/api/reservas", {
++      cuerpo: { socioId: "socio-041", pistaId: "pista-3", inicio: "2026-12-01T11:00", duracion: 120 },
++    });
++    assert.equal(deCientoVeinte.status, 201);
++    assert.equal(deCientoVeinte.cuerpo.reserva.duracion, 120);
++    assert.equal(deCientoVeinte.cuerpo.reserva.fin, "2026-12-01T13:00");
++
++    for (const malo of [45, 0, 121, "90", null, 1.5]) {
++      const r = await api.pedir("POST", "/api/reservas", {
++        cuerpo: { socioId: "socio-003", pistaId: "pista-3", inicio: "2026-12-01T14:00", duracion: malo },
++      });
++      assert.equal(r.status, 400, `duracion=${JSON.stringify(malo)} debe fallar`);
++      assert.equal(r.cuerpo.error.codigo, "DURACION_INVALIDA");
++    }
++  });
++});
++
++test("una reserva empieza en punto o y media, no antes de las 09:00 y termina como muy tarde a las 22:30", async () => {
++  await conApi(async (api) => {
++    const base = { socioId: "socio-041", pistaId: "pista-1" };
++
++    const media = await api.pedir("POST", "/api/reservas", {
++      cuerpo: { ...base, inicio: "2026-12-01T20:30", duracion: 120 },
++    });
++    assert.equal(media.status, 201);
++    assert.equal(media.cuerpo.reserva.fin, "2026-12-01T22:30");
++
++    const invalidas = [
++      { inicio: "2026-12-01T09:15", duracion: 60 }, // no es en punto ni y media
++      { inicio: "2026-12-01T08:30", duracion: 60 }, // antes de las 09:00
++      { inicio: "2026-12-01T21:30", duracion: 90 }, // termina a las 23:00
++      { inicio: "2026-12-01T21:30", duracion: 120 }, // termina a las 23:30
++    ];
++    for (const cuerpo of invalidas) {
++      const r = await api.pedir("POST", "/api/reservas", { cuerpo: { ...base, ...cuerpo } });
++      assert.equal(r.status, 400, `${cuerpo.inicio}/${cuerpo.duracion} debe fallar`);
++      assert.equal(r.cuerpo.error.codigo, "FRANJA_INVALIDA");
++    }
++
++    const justa = await api.pedir("POST", "/api/reservas", {
++      cuerpo: { ...base, inicio: "2026-12-02T21:30", duracion: 60 },
++    });
++    assert.equal(justa.status, 201);
++    assert.equal(justa.cuerpo.reserva.fin, "2026-12-02T22:30");
++  });
++});
++
++test("fin es inicio más la duración", async () => {
++  await conApi(async (api) => {
++    const r = await api.pedir("POST", "/api/reservas", {
++      cuerpo: { socioId: "socio-041", pistaId: "pista-1", inicio: "2026-12-01T13:30", duracion: 120 },
++    });
++    assert.equal(r.status, 201);
++    assert.equal(r.cuerpo.reserva.inicio, "2026-12-01T13:30");
++    assert.equal(r.cuerpo.reserva.fin, "2026-12-01T15:30");
++  });
++});
++
++test("sin solapes: no se puede solapar con reservas confirmadas, ni con las de 90 minutos que ya existían", async () => {
++  await conApi(async (api) => {
++    const primera = await api.pedir("POST", "/api/reservas", {
++      cuerpo: { socioId: "socio-041", pistaId: "pista-3", inicio: "2026-12-01T09:00", duracion: 60 },
++    });
++    assert.equal(primera.status, 201);
++
++    // Termina justo cuando empieza otra: no es solaparse.
++    const pegada = await api.pedir("POST", "/api/reservas", {
++      cuerpo: { socioId: "socio-006", pistaId: "pista-3", inicio: "2026-12-01T10:00", duracion: 60 },
++    });
++    assert.equal(pegada.status, 201);
++
++    // Solape parcial con la primera (09:00-10:00).
++    const solape = await api.pedir("POST", "/api/reservas", {
++      cuerpo: { socioId: "socio-007", pistaId: "pista-3", inicio: "2026-12-01T09:30", duracion: 60 },
++    });
++    assert.equal(solape.status, 409);
++    assert.equal(solape.cuerpo.error.codigo, "FRANJA_NO_DISPONIBLE");
++
++    // Solape con una reserva de 90 minutos que ya existía en la semilla: jueves 19 a las 19:30 en la pista 1.
++    const antigua = await api.pedir("POST", "/api/reservas", {
++      cuerpo: { socioId: "socio-041", pistaId: "pista-1", inicio: "2026-11-19T19:00", duracion: 60 },
++    });
++    assert.equal(antigua.status, 409);
++    assert.equal(antigua.cuerpo.error.codigo, "FRANJA_NO_DISPONIBLE");
++
++    // Las canceladas no ocupan la pista.
++    const cancelable = await api.pedir("POST", "/api/reservas", {
++      cuerpo: { socioId: "socio-008", pistaId: "pista-2", inicio: "2026-12-01T09:00", duracion: 60 },
++    });
++    assert.equal(cancelable.status, 201);
++    const cancelada = await api.pedir("POST", `/api/reservas/${cancelable.cuerpo.reserva.id}/cancelar`);
++    assert.equal(cancelada.status, 200);
++    const reusa = await api.pedir("POST", "/api/reservas", {
++      cuerpo: { socioId: "socio-009", pistaId: "pista-2", inicio: "2026-12-01T09:00", duracion: 60 },
++    });
++    assert.equal(reusa.status, 201);
++  });
++});
++
++test("el importe se calcula por minutos, cruzando las 18:00 y en fin de semana", async () => {
++  await conApi(async (api) => {
++    // Ejemplo de la spec: pista 1 (1800/2800), martes 17:30-19:00 → 2467.
++    const cruzada = await api.pedir("POST", "/api/reservas", {
++      cuerpo: { socioId: "socio-041", pistaId: "pista-1", inicio: "2026-12-01T17:30", duracion: 90 },
++    });
++    assert.equal(cruzada.status, 201);
++    assert.equal(cruzada.cuerpo.reserva.importe, 2467);
++
++    // Fin de semana: sábado 09:00-10:00, todo punta → 60 × 2800 / 90 = 1867.
++    const sabado = await api.pedir("POST", "/api/reservas", {
++      cuerpo: { socioId: "socio-006", pistaId: "pista-1", inicio: "2026-12-05T09:00", duracion: 60 },
++    });
++    assert.equal(sabado.cuerpo.reserva.importe, 1867);
++
++    // Valle en día laborable: martes 12:00-13:00 → 60 × 1800 / 90 = 1200.
++    const valle = await api.pedir("POST", "/api/reservas", {
++      cuerpo: { socioId: "socio-007", pistaId: "pista-1", inicio: "2026-12-01T12:00", duracion: 60 },
++    });
++    assert.equal(valle.cuerpo.reserva.importe, 1200);
++  });
++});
++
++test("una reserva de 90 minutos a una hora de siempre cuesta lo mismo que antes", async () => {
++  const casos = [
++    { inicio: "2026-12-01T09:00", importe: 1800 },
++    { inicio: "2026-12-01T16:30", importe: 1800 },
++    { inicio: "2026-12-01T18:00", importe: 2800 },
++    { inicio: "2026-12-01T21:00", importe: 2800 },
++    { inicio: "2026-12-05T09:00", importe: 2800 }, // fin de semana
++  ];
++  for (const [i, caso] of casos.entries()) {
++    const api = await arrancarApi();
++    try {
++      const r = await api.pedir("POST", "/api/reservas", {
++        cuerpo: { socioId: "socio-041", pistaId: "pista-1", inicio: caso.inicio },
++      });
++      assert.equal(r.status, 201, `caso ${i} (${caso.inicio})`);
++      assert.equal(r.cuerpo.reserva.importe, caso.importe, `caso ${i} (${caso.inicio})`);
++    } finally {
++      api.cerrar();
++    }
++  }
++});
++
++test("todas las reservas devuelven duracion, también las que ya existían", async () => {
++  await conApi(async (api) => {
++    const lista = await api.pedir("GET", "/api/reservas?limite=100");
++    assert.ok(lista.cuerpo.reservas.length > 0);
++    assert.ok(lista.cuerpo.reservas.every((r: { duracion: number }) => r.duracion === 90));
++
++    const una = await api.pedir("GET", `/api/reservas/${lista.cuerpo.reservas[0].id}`);
++    assert.equal(una.cuerpo.reserva.duracion, 90);
++  });
++});
++
++test("una franja de 90 minutos está reservada si una reserva confirmada se solapa con ella, aunque sea en parte", async () => {
++  await conApi(async (api) => {
++    const r = await api.pedir("POST", "/api/reservas", {
++      cuerpo: { socioId: "socio-041", pistaId: "pista-3", inicio: "2026-12-01T10:00", duracion: 60 },
++    });
++    assert.equal(r.status, 201);
++
++    const disp = await api.pedir("GET", "/api/disponibilidad?fecha=2026-12-01");
++    const pista3 = disp.cuerpo.pistas.find((p: { pistaId: string }) => p.pistaId === "pista-3");
++    const estado = Object.fromEntries(pista3.franjas.map((f: { inicio: string; estado: string }) => [f.inicio, f.estado]));
++    // 10:00-11:00 solapa en parte con 09:00-10:30 y con 10:30-12:00.
++    assert.equal(estado["2026-12-01T09:00"], "reservada");
++    assert.equal(estado["2026-12-01T10:30"], "reservada");
++    assert.equal(estado["2026-12-01T12:00"], "libre");
++  });
++});
++
++test("cada pista trae huecos: los intervalos libres más largos posibles, y una pista cerrada no tiene", async () => {
++  await conApi(async (api) => {
++    // Día sin reservas: un único hueco de 09:00 a 22:30.
++    const vacio = await api.pedir("GET", "/api/disponibilidad?fecha=2026-12-01");
++    const pista3Vacia = vacio.cuerpo.pistas.find((p: { pistaId: string }) => p.pistaId === "pista-3");
++    assert.deepEqual(pista3Vacia.huecos, [{ inicio: "2026-12-01T09:00", fin: "2026-12-01T22:30" }]);
++
++    const cerrada = vacio.cuerpo.pistas.find((p: { pistaId: string }) => p.pistaId === "pista-4");
++    assert.deepEqual(cerrada.huecos, []);
++
++    // Con una reserva de 60 minutos a las 10:00 se parte en dos huecos.
++    await api.pedir("POST", "/api/reservas", {
++      cuerpo: { socioId: "socio-041", pistaId: "pista-3", inicio: "2026-12-01T10:00", duracion: 60 },
++    });
++    const ocupado = await api.pedir("GET", "/api/disponibilidad?fecha=2026-12-01&pista=pista-3");
++    assert.deepEqual(ocupado.cuerpo.pistas[0].huecos, [
++      { inicio: "2026-12-01T09:00", fin: "2026-12-01T10:00" },
++      { inicio: "2026-12-01T11:00", fin: "2026-12-01T22:30" },
++    ]);
++  });
++});
++
++test("las reglas del club siguen aplicando sea cual sea la duración", async () => {
++  await conApi(async (api) => {
++    // Cuota al día.
++    const sinCuota = await api.pedir("POST", "/api/reservas", {
++      cuerpo: { socioId: "socio-011", pistaId: "pista-1", inicio: "2026-12-01T09:00", duracion: 60 },
++    });
++    assert.equal(sinCuota.cuerpo.error.codigo, "CUOTA_INACTIVA");
++
++    // Pista cerrada.
++    const cerrada = await api.pedir("POST", "/api/reservas", {
++      cuerpo: { socioId: "socio-041", pistaId: "pista-4", inicio: "2026-12-01T09:00", duracion: 60 },
++    });
++    assert.equal(cerrada.cuerpo.error.codigo, "PISTA_CERRADA");
++
++    // La reserva no puede haber empezado.
++    const pasada = await api.pedir("POST", "/api/reservas", {
++      cuerpo: { socioId: "socio-041", pistaId: "pista-1", inicio: "2026-11-18T09:00", duracion: 60 },
++    });
++    assert.equal(pasada.cuerpo.error.codigo, "FRANJA_PASADA");
++
++    // Máximo de 3 reservas futuras, sea cual sea su duración.
++    const reservas = [
++      { inicio: "2026-12-02T09:00", duracion: 60 },
++      { inicio: "2026-12-02T10:00", duracion: 90 },
++      { inicio: "2026-12-02T12:00", duracion: 120 },
++    ];
++    for (const [i, datos] of reservas.entries()) {
++      const r = await api.pedir("POST", "/api/reservas", {
++        cuerpo: { socioId: "socio-041", pistaId: "pista-1", ...datos },
++      });
++      assert.equal(r.status, 201, `reserva ${i + 1} de 3`);
++    }
++    const cuarta = await api.pedir("POST", "/api/reservas", {
++      cuerpo: { socioId: "socio-041", pistaId: "pista-1", inicio: "2026-12-02T15:00", duracion: 60 },
++    });
++    assert.equal(cuarta.cuerpo.error.codigo, "LIMITE_DE_RESERVAS");
++  });
++});
++
++test("cancelar no cambia: gratis hasta 24 horas antes y después solo con forzar y penalización del 100 %", async () => {
++  await conApi(async (api) => {
++    // Cancelación gratuita lejos del inicio.
++    const gratis = await api.pedir("POST", "/api/reservas", {
++      cuerpo: { socioId: "socio-041", pistaId: "pista-1", inicio: "2026-12-10T09:00", duracion: 60 },
++    });
++    const cancelada = await api.pedir("POST", `/api/reservas/${gratis.cuerpo.reserva.id}/cancelar`);
++    assert.equal(cancelada.status, 200);
++    assert.equal(cancelada.cuerpo.reserva.estado, "cancelada");
++    assert.equal(cancelada.cuerpo.reserva.penalizacion, undefined);
++
++    // Dentro de las 24 horas: penalización del 100 % del importe de la reserva de 60 minutos.
++    const otra = await arrancarApi({ AHORA: "2026-12-05T09:00" });
++    try {
++      const proxima = await otra.pedir("POST", "/api/reservas", {
++        cuerpo: { socioId: "socio-041", pistaId: "pista-1", inicio: "2026-12-05T18:00", duracion: 60 },
++      });
++      assert.equal(proxima.cuerpo.reserva.importe, 1867);
++      const sinForzar = await otra.pedir("POST", `/api/reservas/${proxima.cuerpo.reserva.id}/cancelar`);
++      assert.equal(sinForzar.cuerpo.error.codigo, "FUERA_DE_PLAZO");
++      const forzada = await otra.pedir("POST", `/api/reservas/${proxima.cuerpo.reserva.id}/cancelar`, { cuerpo: { forzar: true } });
++      assert.equal(forzada.cuerpo.reserva.estado, "cancelada");
++      assert.equal(forzada.cuerpo.reserva.penalizacion, 1867);
++    } finally {
++      otra.cerrar();
++    }
++  });
++});

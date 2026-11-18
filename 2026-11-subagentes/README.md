@@ -138,6 +138,45 @@ Una ejecución por herramienta y condición. Coste a precio de API, contexto del
 
 Comprobado en cada ejecución: hay subagentes cuando la condición los pide y ninguno cuando no, y en Claude P el subagente corre con el modelo de su fichero. Por lo que se vio, cada herramienta usa de serie su modelo principal en los subagentes (Claude Code también en Explore), y Codex les pasa toda la conversación (`fork_turns: "all"`).
 
+## Resultados del lote (18 de noviembre)
+
+72 ejecuciones, 40,58 $ a precio de API (0 $ reales: suscripciones y créditos de NaN). Se regeneran con `python3 -I analisis/resumen.py lote`, que escribe `analisis/resumen-lote.json` y esta tabla (`analisis/resumen-lote.md`). Condiciones: A sin subagentes y B con ellos en los casos 1 y 2. En el caso 3, S skill, P subagente con el modelo principal y B subagente con el modelo barato.
+
+| Caso | Herramienta | Condición | n | Coste (mediana) | Tiempo (mediana) | Contexto final del principal (mediana) | Subagentes | Resultado |
+|---|---|---|---|---|---|---|---|---|
+| 1 | Claude Code | A | 3 | 0,66 $ | 116 s | 59.984 | 0/0/0 | 83/83 err=0 inv=0; 83/83 err=0 inv=0; 83/83 err=0 inv=0 |
+| 1 | Claude Code | B | 3 | 1,54 $ | 174 s | 52.928 | 5/3/4 | 83/83 err=0 inv=0; 83/83 err=0 inv=0; 83/83 err=0 inv=0 |
+| 1 | Codex | A | 3 | 0,18 $ | 155 s | 57.039 | 0/0/0 | 83/83 err=0 inv=0; 83/83 err=0 inv=0; 83/83 err=0 inv=0 |
+| 1 | Codex | B | 3 | 0,64 $ | 256 s | 33.834 | 3/3/3 | 83/83 err=0 inv=0; 83/83 err=0 inv=0; 83/83 err=0 inv=0 |
+| 1 | OpenCode | A | 3 | 0,17 $ | 452 s | 94.921 | 0/0/0 | 83/83 err=0 inv=0; 83/83 err=0 inv=0; 83/83 err=0 inv=0 |
+| 1 | OpenCode | B | 3 | 0,55 $ | 991 s | 86.662 | 8/5/6 | 83/83 err=0 inv=0; 83/83 err=0 inv=0; 83/83 err=0 inv=0 |
+| 2 | Claude Code | A | 3 | 1,69 $ | 343 s | 95.343 | 0/0/0 | 3/3 completas, 3/3 completas, 3/3 completas |
+| 2 | Claude Code | B | 3 | 2,64 $ | 221 s | 55.368 | 3/3/3 | 3/3 completas, 2/3 completas, 2/3 completas |
+| 2 | Codex | A | 3 | 0,23 $ | 315 s | 55.194 | 0/0/0 | 3/3 completas, 3/3 completas, 3/3 completas |
+| 2 | Codex | B | 3 | 0,77 $ | 208 s | 56.072 | 3/3/3 | 3/3 completas, 3/3 completas, 3/3 completas |
+| 2 | OpenCode | A | 3 | 0,24 $ | 694 s | 112.798 | 0/0/0 | 3/3 completas, 2/3 completas, 2/3 completas |
+| 2 | OpenCode | B | 3 | 0,57 $ | 1026 s | 61.832 | 3/3/3 | 3/3 completas, 2/3 completas, 3/3 completas |
+| 3 | Claude Code | B | 4 | 0,21 $ | 264 s | 32.782 | 1/1/1/1 | 1/1 completas, 1/1 completas, 1/1 completas, 1/1 completas |
+| 3 | Claude Code | P | 4 | 0,86 $ | 172 s | 33.218 | 1/1/1/1 | 1/1 completas, 1/1 completas, 1/1 completas, 1/1 completas |
+| 3 | Claude Code | S | 4 | 0,74 $ | 142 s | 62.936 | 0/0/0/0 | 1/1 completas, 1/1 completas, 1/1 completas, 1/1 completas |
+| 3 | Codex | B | 4 | 0,10 $ | 217 s | 18.772 | 1/1/1/1 | 1/1 completas, 1/1 completas, 1/1 completas, 1/1 completas |
+| 3 | Codex | P | 4 | 0,29 $ | 210 s | 19.994 | 1/1/1/1 | 1/1 completas, 1/1 completas, 1/1 completas, 1/1 completas |
+| 3 | Codex | S | 4 | 0,17 $ | 159 s | 37.847 | 0/0/0/0 | 1/1 completas, 1/1 completas, 1/1 completas, 1/1 completas |
+| 3 | OpenCode | B | 4 | 0,03 $ | 198 s | 7.586 | 1/1/1/1 | 1/1 completas, 1/1 completas, 1/1 completas, 1/1 completas |
+| 3 | OpenCode | P | 4 | 0,13 $ | 438 s | 8.242 | 1/1/1/1 | 1/1 completas, 0/1 completas, 1/1 completas, 1/1 completas |
+| 3 | OpenCode | S | 4 | 0,13 $ | 385 s | 66.096 | 0/0/0/0 | 1/1 completas, 1/1 completas, 1/1 completas, 1/1 completas |
+
+Lo principal:
+
+- **Caso 1.** Las 18 ejecuciones aciertan las 83 variables. Con subagentes cuesta 2,3 veces más en Claude Code, 3,6 en Codex y 3,2 en OpenCode, y tarda más en las tres. El contexto final del principal baja mucho en Codex (57K a 34K) y poco en las otras dos. Los subagentes se llevan entre el 56 % y el 67 % del gasto. Sin subagentes, el principal no pasa de unos 95K, por debajo del umbral de 100K de The Infinity.
+- **Caso 2.** En paralelo, Claude Code y Codex terminan en torno a un 35 % antes. OpenCode tarda más. El coste sube 1,6 veces en Claude Code, 3,3 en Codex y 2,4 en OpenCode. Codex completa 9/9 features en las dos condiciones. Claude Code completa 9/9 sin subagentes y 7/9 con ellos: las dos veces falla el C10 de `exportar-csv` porque el subagente de `codigos-descuento` añade `importeBase` y `descuento` a todas las reservas. OpenCode falla ese C10 también sin subagentes (2 de 3), y con subagentes falla una vez el C3 de `codigos-descuento`.
+- **Caso 3.** Todas las ejecuciones pasan el gate. Con el modelo barato, el subagente cuesta un 71 % menos que la skill en Claude Code, un 41 % menos en Codex y un 73 % menos en OpenCode, y completa los 4 encargos en las tres. Con el mismo modelo cuesta un 16 % más en Claude Code, un 74 % más en Codex y lo mismo en OpenCode.
+- **El fallo de `c3-opencode-P-duraciones-r2`.** El principal lanzó el subagente y cerró su turno a los 14 s ("quedo a la espera"), aunque el encargo le pedía esperar. El subagente siguió en segundo plano y el runner mató la ejecución a los 750 s por silencio (`rc = estancado`, límite de 12 min sin salida). Queda con 1/12 criterios. El corte es del runner, pero el comportamiento del principal es de OpenCode y se cuenta como fallo.
+
+### Sondas
+
+`analisis/sondas/anidar.py` comprueba si un subagente puede lanzar otro (18-nov, resultados en `analisis/sondas/resultados/`). En Codex 0.170.0 sí: el subagente lanzó otro con `depth: 2` y devolvió PING. En OpenCode 2.3.2, el subagente `general` no tiene la herramienta `subagent` y responde SIN_HERRAMIENTA. En las bases de datos de OpenCode del lote se ve además que lanza los subagentes a la vez, hasta 8 en el caso 1.
+
 ## Cómo se ejecuta
 
 ```sh

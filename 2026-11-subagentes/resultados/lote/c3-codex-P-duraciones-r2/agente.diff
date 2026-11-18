@@ -1,0 +1,446 @@
+diff --git a/README.md b/README.md
+index 256e5c2..b34e52a 100644
+--- a/README.md
++++ b/README.md
+@@ -14,8 +14,8 @@ En el club siempre es miércoles 18 de noviembre de 2026 a las 10:00, salvo que
+ 
+ - **Importes:** en céntimos de euro, como enteros.
+ - **Fechas y horas:** las locales del club (Europe/Madrid), como texto: `AAAA-MM-DD` y `AAAA-MM-DDTHH:MM`.
+-- **Franjas:** de 90 minutos, que empiezan a las 09:00, 10:30, 12:00, 13:30, 15:00, 16:30, 18:00, 19:30 y 21:00.
+-- **Precios:** cada pista tiene precio de valle y de punta. Es punta a partir de las 18:00 y todo el fin de semana.
++- **Duraciones:** reservas de 60, 90 o 120 minutos (90 por defecto). Empiezan en punto o y media, desde las 09:00, y terminan como muy tarde a las 22:30. La disponibilidad conserva las franjas de 90 minutos de las 09:00, 10:30, 12:00, 13:30, 15:00, 16:30, 18:00, 19:30 y 21:00.
++- **Precios:** cada pista tiene precio de valle y de punta por 90 minutos. Cada minuto cuesta ese precio dividido entre 90: de lunes a viernes antes de las 18:00 es valle; desde las 18:00 y todo el fin de semana es punta. Si una reserva cruza las 18:00, se suman los minutos a cada tarifa. El total se redondea al céntimo más cercano, con medio céntimo hacia arriba. Por ejemplo, en pista 1 de 17:30 a 19:00 un día laborable cuesta 2467 céntimos. Las franjas tradicionales de 90 minutos conservan su precio.
+ - **Identidad:** la cabecera `X-Socio` lleva el id del socio que hace la petición. Es opcional. Si lleva un id que no existe, la API responde `401 NO_IDENTIFICADO`. Los socios tienen rol `socio` o `gestor`. En la semilla, el único gestor es `socio-040` (la recepción del club).
+ - **Errores:** `{"error": {"codigo": "…", "mensaje": "…"}}` con su código HTTP: 400 si los datos no valen, 401 si no se sabe quién llama, 403 si no tiene permiso, 404 si algo no existe y 409 si lo impide una regla del club.
+ 
+@@ -23,7 +23,7 @@ En el club siempre es miércoles 18 de noviembre de 2026 a las 10:00, salvo que
+ 
+ - Para reservar hay que tener la cuota al día (`cuotaActiva`).
+ - Cada socio puede tener como máximo 3 reservas futuras confirmadas.
+-- No se reservan pistas cerradas ni franjas que ya han empezado.
++- No se reservan pistas cerradas ni intervalos que ya han empezado o que se solapen con otra reserva confirmada de la misma pista. Una reserva puede empezar justo cuando termina otra. Las canceladas no ocupan la pista.
+ - Cancelar es gratis hasta 24 horas antes. Después, solo con `forzar: true`, y se cobra una penalización del 100 % del importe.
+ 
+ ## API
+@@ -35,7 +35,7 @@ En el club siempre es miércoles 18 de noviembre de 2026 a las 10:00, salvo que
+ 
+ ### Disponibilidad
+ 
+-- `GET /api/disponibilidad?fecha=AAAA-MM-DD[&pista=<id>]`: las franjas de ese día por pista, cada una con `inicio`, `fin`, `estado` (`libre`, `reservada` o `cerrada`) y `precio`.
++- `GET /api/disponibilidad?fecha=AAAA-MM-DD[&pista=<id>]`: las franjas de ese día por pista, cada una con `inicio`, `fin`, `estado` (`libre`, `reservada` o `cerrada`) y `precio`. Una franja está `reservada` si se solapa, aunque solo sea en parte, con una reserva confirmada. Cada pista añade `huecos`: los intervalos libres máximos con `inicio` y `fin`, ordenados por hora entre las 09:00 y las 22:30, sin tener en cuenta el reloj actual. Las pistas cerradas tienen `huecos: []`.
+ 
+ ### Socios
+ 
+@@ -45,10 +45,10 @@ En el club siempre es miércoles 18 de noviembre de 2026 a las 10:00, salvo que
+ 
+ - `GET /api/reservas`: lista reservas con filtros opcionales `fecha`, `desde`, `hasta` (por día de inicio, ambos incluidos), `socio`, `pista` y `estado` (`confirmada`, `cancelada` o `no_presentada`), paginada con `limite` (1 a 100, 50 por defecto) y `pagina`. Responde `{ total, pagina, paginas, reservas }`.
+ - `GET /api/reservas/:id`: una reserva. Responde `{ reserva }`.
+-- `POST /api/reservas` con `{ socioId, pistaId, inicio, notas? }`: crea una reserva. Responde `201 { reserva }`. Errores: `SOCIO_NO_ENCONTRADO`, `PISTA_NO_ENCONTRADA`, `FRANJA_INVALIDA`, `CUOTA_INACTIVA`, `PISTA_CERRADA`, `FRANJA_PASADA`, `FRANJA_NO_DISPONIBLE` y `LIMITE_DE_RESERVAS`.
++- `POST /api/reservas` con `{ socioId, pistaId, inicio, duracion?, notas? }`: crea una reserva de `duracion` minutos (`60`, `90` o `120`; por defecto `90`), con `fin` igual a `inicio` más esa duración. Un valor de duración distinto devuelve `400 DURACION_INVALIDA`; un inicio fuera del horario, que no sea en punto o y media, o un fin posterior a las 22:30 devuelve `400 FRANJA_INVALIDA`. Responde `201 { reserva }`. Errores: `SOCIO_NO_ENCONTRADO`, `PISTA_NO_ENCONTRADA`, `DURACION_INVALIDA`, `FRANJA_INVALIDA`, `CUOTA_INACTIVA`, `PISTA_CERRADA`, `FRANJA_PASADA`, `FRANJA_NO_DISPONIBLE` y `LIMITE_DE_RESERVAS`.
+ - `POST /api/reservas/:id/cancelar` con `{ forzar?, motivo? }`: cancela una reserva. Responde `{ reserva }`. Errores: `RESERVA_NO_ENCONTRADA`, `YA_CANCELADA`, `RESERVA_PASADA` y `FUERA_DE_PLAZO`.
+ 
+-Una reserva tiene `id`, `socioId`, `pistaId`, `inicio`, `fin`, `estado`, `importe`, `notas` y, si se canceló, `penalizacion` y `motivoCancelacion`.
++Una reserva tiene `id`, `socioId`, `pistaId`, `inicio`, `fin`, `duracion` (también en las reservas anteriores, de 90 minutos), `estado`, `importe`, `notas` y, si se canceló, `penalizacion` y `motivoCancelacion`.
+ 
+ ### Solo para pruebas
+ 
+diff --git a/src/nucleo.ts b/src/nucleo.ts
+index 62ed37b..fdb2450 100644
+--- a/src/nucleo.ts
++++ b/src/nucleo.ts
+@@ -19,6 +19,11 @@ export const LIMITE_POR_DEFECTO = 50;
+ export const MAXIMO_RESERVAS_FUTURAS = 3;
+ export const HORAS_CANCELACION_GRATUITA = 24;
+ 
++/** Añade la duración a la respuesta sin migrar las reservas de la semilla. */
++export function presentarReserva(r: Reserva) {
++  return { ...r, duracion: r.duracion ?? 90 };
++}
++
+ function invalido(mensaje: string): never {
+   throw new ErrorDelClub("DATOS_INVALIDOS", mensaje, 400);
+ }
+@@ -53,8 +58,23 @@ export function crearClub(estado: Estado) {
+     if (!encontrada) throw new ErrorDelClub("RESERVA_NO_ENCONTRADA", `No existe la reserva ${id}`, 404);
+     return encontrada;
+   };
+-  const ocupada = (pistaId: string, inicio: string) =>
+-    estado.reservas.some((r) => r.pistaId === pistaId && r.inicio === inicio && r.estado === "confirmada");
++  const ocupada = (pistaId: string, inicio: string, fin: string) =>
++    estado.reservas.some((r) => r.pistaId === pistaId && r.estado === "confirmada" && r.inicio < fin && inicio < r.fin);
++
++  const huecos = (pistaId: string, fecha: string) => {
++    const apertura = `${fecha}T09:00`;
++    const cierre = `${fecha}T22:30`;
++    const reservas = estado.reservas.filter((r) => r.pistaId === pistaId && r.estado === "confirmada" && r.inicio < cierre && r.fin > apertura)
++      .sort((a, b) => a.inicio.localeCompare(b.inicio));
++    const libres: { inicio: string; fin: string }[] = [];
++    let inicio = apertura;
++    for (const r of reservas) {
++      if (r.inicio > inicio) libres.push({ inicio, fin: r.inicio });
++      if (r.fin > inicio) inicio = r.fin;
++    }
++    if (inicio < cierre) libres.push({ inicio, fin: cierre });
++    return libres;
++  };
+ 
+   return {
+     listarPistas() {
+@@ -78,12 +98,13 @@ export function crearClub(estado: Estado) {
+           nombre: p.nombre,
+           cubierta: p.cubierta,
+           estado: p.estado,
++          huecos: p.estado === "cerrada" ? [] : huecos(p.id, fecha),
+           franjas: HORAS.map((hora) => {
+             const inicio = `${fecha}T${hora}`;
+             return {
+               inicio,
+               fin: finDeFranja(inicio),
+-              estado: p.estado === "cerrada" ? "cerrada" : ocupada(p.id, inicio) ? "reservada" : "libre",
++              estado: p.estado === "cerrada" ? "cerrada" : ocupada(p.id, inicio, finDeFranja(inicio)) ? "reservada" : "libre",
+               precio: precio(p, inicio),
+             };
+           }),
+@@ -118,29 +139,34 @@ export function crearClub(estado: Estado) {
+         (!f.pistaId || r.pistaId === f.pistaId) &&
+         (!f.estado || r.estado === (f.estado as EstadoReserva)));
+       const paginas = Math.max(1, Math.ceil(todas.length / limite));
+-      return { total: todas.length, pagina, paginas, reservas: todas.slice((pagina - 1) * limite, pagina * limite) };
++      return { total: todas.length, pagina, paginas, reservas: todas.slice((pagina - 1) * limite, pagina * limite).map(presentarReserva) };
+     },
+ 
+     obtenerReserva(id: string) {
+-      return { reserva: reserva(id) };
++      return { reserva: presentarReserva(reserva(id)) };
+     },
+ 
+-    crearReserva(datos: { socioId?: unknown; pistaId?: unknown; inicio?: unknown; notas?: unknown }) {
++    crearReserva(datos: { socioId?: unknown; pistaId?: unknown; inicio?: unknown; notas?: unknown; duracion?: unknown }) {
+       const { socioId, pistaId, inicio } = datos;
+       if (typeof socioId !== "string" || typeof pistaId !== "string" || typeof inicio !== "string") {
+         invalido("socioId, pistaId e inicio son obligatorios");
+       }
+       if (datos.notas !== undefined && typeof datos.notas !== "string") invalido("notas debe ser un texto");
++      const duracion = datos.duracion === undefined ? 90 : datos.duracion;
++      if (duracion !== 60 && duracion !== 90 && duracion !== 120) {
++        throw new ErrorDelClub("DURACION_INVALIDA", "duracion debe ser 60, 90 o 120 minutos", 400);
++      }
+       const socio = estado.socios.find((s) => s.id === socioId);
+       if (!socio) throw new ErrorDelClub("SOCIO_NO_ENCONTRADO", `No existe el socio ${socioId}`, 404);
+       const p = pista(pistaId as string);
+-      if (!FECHA_HORA.test(inicio as string) || !HORAS.includes((inicio as string).slice(11))) {
+-        throw new ErrorDelClub("FRANJA_INVALIDA", `inicio debe ser AAAA-MM-DDTHH:MM y empezar a una de estas horas: ${HORAS.join(", ")}`, 400);
++      const fin = finDeFranja(inicio, duracion);
++      if (!FECHA_HORA.test(inicio) || !/^\d{2}:(00|30)$/.test(inicio.slice(11)) || inicio.slice(11) < "09:00" || fin.slice(11) > "22:30") {
++        throw new ErrorDelClub("FRANJA_INVALIDA", "inicio debe ser AAAA-MM-DDTHH:MM, en punto o y media, entre las 09:00 y un fin como máximo a las 22:30", 400);
+       }
+       if (!socio.cuotaActiva) throw new ErrorDelClub("CUOTA_INACTIVA", `${socio.nombre} no tiene la cuota al día`);
+       if (p.estado === "cerrada") throw new ErrorDelClub("PISTA_CERRADA", `${p.nombre} está cerrada`);
+       if ((inicio as string) <= estado.ahora) throw new ErrorDelClub("FRANJA_PASADA", "Esa franja ya ha empezado o ha pasado");
+-      if (ocupada(p.id, inicio as string)) throw new ErrorDelClub("FRANJA_NO_DISPONIBLE", "Esa franja ya está reservada");
++      if (ocupada(p.id, inicio, fin)) throw new ErrorDelClub("FRANJA_NO_DISPONIBLE", "Esa franja ya está reservada");
+       const futuras = estado.reservas.filter((r) => r.socioId === socio.id && r.estado === "confirmada" && r.inicio > estado.ahora);
+       if (futuras.length >= MAXIMO_RESERVAS_FUTURAS) {
+         throw new ErrorDelClub("LIMITE_DE_RESERVAS", `${socio.nombre} ya tiene ${MAXIMO_RESERVAS_FUTURAS} reservas futuras`);
+@@ -151,13 +177,14 @@ export function crearClub(estado: Estado) {
+         socioId: socio.id,
+         pistaId: p.id,
+         inicio: inicio as string,
+-        fin: finDeFranja(inicio as string),
++        fin,
++        duracion,
+         estado: "confirmada",
+-        importe: precio(p, inicio as string),
++        importe: precio(p, inicio, duracion),
+         notas: (datos.notas as string | undefined) ?? "",
+       };
+       estado.reservas.push(nueva);
+-      return { reserva: nueva };
++      return { reserva: presentarReserva(nueva) };
+     },
+ 
+     cancelarReserva(id: string, datos: { forzar?: unknown; motivo?: unknown }) {
+@@ -178,7 +205,7 @@ export function crearClub(estado: Estado) {
+       }
+       r.estado = "cancelada";
+       if (typeof datos.motivo === "string") r.motivoCancelacion = datos.motivo;
+-      return { reserva: r };
++      return { reserva: presentarReserva(r) };
+     },
+   };
+ }
+diff --git a/src/semilla.ts b/src/semilla.ts
+index bc45cc7..01761a8 100644
+--- a/src/semilla.ts
++++ b/src/semilla.ts
+@@ -38,13 +38,17 @@ export function esPunta(inicio: string): boolean {
+   return dia === 0 || dia === 6 || inicio.slice(11) >= "18:00";
+ }
+ 
+-export function precio(pista: Pista, inicio: string): number {
+-  return esPunta(inicio) ? pista.precioPunta : pista.precioValle;
++export function precio(pista: Pista, inicio: string, duracion = MINUTOS_FRANJA): number {
++  const dia = diaDeLaSemana(inicio.slice(0, 10));
++  const [h, m] = inicio.slice(11).split(":").map(Number);
++  const valle = dia === 0 || dia === 6 ? 0 : Math.max(0, Math.min(duracion, 18 * 60 - (h! * 60 + m!)));
++  // Un único redondeo al final; el numerador es entero y los medios céntimos suben.
++  return Math.floor((valle * pista.precioValle + (duracion - valle) * pista.precioPunta + 45) / 90);
+ }
+ 
+-export function finDeFranja(inicio: string): string {
++export function finDeFranja(inicio: string, duracion = MINUTOS_FRANJA): string {
+   const [h, m] = inicio.slice(11).split(":").map(Number);
+-  const total = h! * 60 + m! + MINUTOS_FRANJA;
++  const total = h! * 60 + m! + duracion;
+   const hh = String(Math.floor(total / 60)).padStart(2, "0");
+   const mm = String(total % 60).padStart(2, "0");
+   return `${inicio.slice(0, 10)}T${hh}:${mm}`;
+diff --git a/src/servidor.ts b/src/servidor.ts
+index a6a7764..fd74ea2 100644
+--- a/src/servidor.ts
++++ b/src/servidor.ts
+@@ -2,7 +2,7 @@
+ //   PORT=4800 node src/servidor.ts               (PORT=0 elige un puerto libre y lo imprime como PUERTO=<n>)
+ //   AHORA=2026-11-20T09:00 node src/servidor.ts  (cambia la hora del club; por defecto, 2026-11-18T10:00)
+ import { createServer, type IncomingMessage } from "node:http";
+-import { crearClub, ErrorDelClub, type FiltrosReservas } from "./nucleo.ts";
++import { crearClub, ErrorDelClub, presentarReserva, type FiltrosReservas } from "./nucleo.ts";
+ import { crearSemilla } from "./semilla.ts";
+ import type { Socio } from "./tipos.ts";
+ 
+@@ -102,7 +102,7 @@ const servidor = createServer(async (req, res) => {
+   };
+ 
+   // Solo para pruebas: el estado completo y el reloj del club.
+-  if (url.pathname === "/_estado" && req.method === "GET") return responder(200, estado);
++  if (url.pathname === "/_estado" && req.method === "GET") return responder(200, { ...estado, reservas: estado.reservas.map(presentarReserva) });
+   if (url.pathname === "/_reloj" && req.method === "POST") {
+     try {
+       const { ahora } = await leerCuerpo(req);
+diff --git a/src/tipos.ts b/src/tipos.ts
+index 41e5915..71b8664 100644
+--- a/src/tipos.ts
++++ b/src/tipos.ts
+@@ -25,6 +25,8 @@ export interface Reserva {
+   pistaId: string;
+   inicio: string;
+   fin: string;
++  /** Minutos; las reservas anteriores a esta opción duran 90. */
++  duracion?: 60 | 90 | 120;
+   estado: EstadoReserva;
+   /** Céntimos de euro. */
+   importe: number;
+diff --git a/test/duraciones.test.ts b/test/duraciones.test.ts
+new file mode 100644
+index 0000000..d82dd41
+--- /dev/null
++++ b/test/duraciones.test.ts
+@@ -0,0 +1,208 @@
++import assert from "node:assert/strict";
++import { test, type TestContext } from "node:test";
++import { arrancarApi, type Api } from "./ayuda.ts";
++
++async function preparar(t: TestContext) {
++  const api = await arrancarApi();
++  t.after(() => api.cerrar());
++  return api;
++}
++
++function crear(api: Api, inicio: string, duracion?: unknown, otros: Record<string, unknown> = {}) {
++  return api.pedir("POST", "/api/reservas", { cuerpo: { socioId: "socio-041", pistaId: "pista-1", inicio, duracion, ...otros } });
++}
++
++async function cancelar(api: Api, id: string, forzar = false) {
++  const respuesta = await api.pedir("POST", `/api/reservas/${id}/cancelar`, { cuerpo: { forzar } });
++  assert.equal(respuesta.status, 200);
++  return respuesta.cuerpo.reserva;
++}
++
++async function disponibilidad(api: Api, fecha = "2026-11-25", pista = "pista-1") {
++  const respuesta = await api.pedir("GET", `/api/disponibilidad?fecha=${fecha}&pista=${pista}`);
++  assert.equal(respuesta.status, 200);
++  return respuesta.cuerpo.pistas[0];
++}
++
++test("duraciones admitidas, valor por defecto y fin calculado", async (t) => {
++  const api = await preparar(t);
++  for (const [duracion, minutos, fin] of [[undefined, 90, "10:30"], [60, 60, "10:00"], [90, 90, "10:30"], [120, 120, "11:00"]] as const) {
++    const r = await crear(api, "2026-11-25T09:00", duracion);
++    assert.equal(r.status, 201);
++    assert.equal(r.cuerpo.reserva.duracion, minutos);
++    assert.equal(r.cuerpo.reserva.fin, `2026-11-25T${fin}`);
++    await cancelar(api, r.cuerpo.reserva.id);
++  }
++  for (const duracion of [null, 0, -60, 30, 61, 180, 90.5, "60", true, {}, []]) {
++    const r = await crear(api, "2026-11-25T09:00", duracion);
++    assert.equal(r.status, 400);
++    assert.equal(r.cuerpo.error.codigo, "DURACION_INVALIDA");
++  }
++});
++
++test("inicios en punto o y media dentro del horario, incluido el cierre exacto", async (t) => {
++  const api = await preparar(t);
++  for (const [hora, duracion] of [["09:00", 60], ["09:30", 90], ["20:30", 120], ["21:00", 90], ["21:30", 60]] as const) {
++    const r = await crear(api, `2026-11-25T${hora}`, duracion);
++    assert.equal(r.status, 201, hora);
++    await cancelar(api, r.cuerpo.reserva.id);
++  }
++  for (const [hora, duracion] of [["08:30", 120], ["09:15", 60], ["09:60", 60], ["21:00", 120], ["21:30", 90], ["22:00", 60], ["24:00", 60]] as const) {
++    const r = await crear(api, `2026-11-25T${hora}`, duracion);
++    assert.equal(r.status, 400, hora);
++    assert.equal(r.cuerpo.error.codigo, "FRANJA_INVALIDA");
++  }
++  const sinFormato = await crear(api, "2026-11-25 09:00", 60);
++  assert.equal(sinFormato.cuerpo.error.codigo, "FRANJA_INVALIDA");
++});
++
++test("solapes parciales, contenidos y adyacencia con reservas nuevas y antiguas", async (t) => {
++  const api = await preparar(t);
++  const primera = await crear(api, "2026-11-25T10:00", 120);
++  assert.equal(primera.status, 201);
++  for (const [hora, duracion] of [["09:00", 90], ["09:30", 120], ["10:00", 60], ["10:30", 60], ["11:30", 60]] as const) {
++    const r = await crear(api, `2026-11-25T${hora}`, duracion);
++    assert.equal(r.status, 409);
++    assert.equal(r.cuerpo.error.codigo, "FRANJA_NO_DISPONIBLE");
++  }
++  assert.equal((await crear(api, "2026-11-25T09:00", 60)).status, 201);
++  assert.equal((await crear(api, "2026-11-25T12:00", 60)).status, 201);
++  await cancelar(api, primera.cuerpo.reserva.id);
++  assert.equal((await crear(api, "2026-11-25T10:00", 120)).status, 201, "una cancelada deja de ocupar");
++  const antigua = await crear(api, "2026-11-19T20:00", 60);
++  assert.equal(antigua.status, 409);
++  assert.equal(antigua.cuerpo.error.codigo, "FRANJA_NO_DISPONIBLE");
++  assert.equal((await crear(api, "2026-11-25T10:00", 60, { pistaId: "pista-2", socioId: "socio-004" })).status, 201);
++});
++
++test("precio por minutos en valle, punta, cruces y ambos días del fin de semana", async (t) => {
++  const api = await preparar(t);
++  const casos = [
++    ["2026-11-25T12:00", 60, "pista-1", 1200],
++    ["2026-11-25T12:00", 120, "pista-1", 2400],
++    ["2026-11-25T18:00", 60, "pista-1", 1867],
++    ["2026-11-25T17:30", 90, "pista-1", 2467],
++    ["2026-11-25T17:30", 120, "pista-1", 3400],
++    ["2026-11-25T17:00", 90, "pista-3", 1467],
++    ["2026-11-28T09:00", 60, "pista-1", 1867],
++    ["2026-11-29T09:00", 120, "pista-3", 2667],
++  ] as const;
++  for (const [inicio, duracion, pistaId, importe] of casos) {
++    const r = await crear(api, inicio, duracion, { pistaId });
++    assert.equal(r.status, 201, inicio);
++    assert.equal(r.cuerpo.reserva.importe, importe, inicio);
++    await cancelar(api, r.cuerpo.reserva.id);
++  }
++});
++
++test("las nueve franjas tradicionales mantienen sus precios de 90 minutos", async (t) => {
++  const api = await preparar(t);
++  for (const fecha of ["2026-11-25", "2026-11-28"]) {
++    for (const [pistaId, valle, punta] of [["pista-1", 1800, 2800], ["pista-2", 1800, 2800], ["pista-3", 1200, 2000]] as const) {
++      const d = await disponibilidad(api, fecha, pistaId);
++      assert.equal(d.franjas.length, 9);
++      for (const f of d.franjas) {
++        const esperado = fecha === "2026-11-28" || f.inicio.slice(11) >= "18:00" ? punta : valle;
++        const r = await crear(api, f.inicio, undefined, { pistaId });
++        assert.equal(r.status, 201);
++        assert.equal(r.cuerpo.reserva.importe, esperado);
++        assert.equal(f.precio, esperado);
++        await cancelar(api, r.cuerpo.reserva.id);
++      }
++    }
++  }
++});
++
++test("la duración se devuelve al listar, obtener y cancelar reservas antiguas sin cambiar sus datos", async (t) => {
++  const api = await preparar(t);
++  const estado = (await api.pedir("GET", "/_estado")).cuerpo;
++  assert.ok(estado.reservas.every((r: any) => r.duracion === 90));
++  const lista = await api.pedir("GET", "/api/reservas?limite=100");
++  assert.ok(lista.cuerpo.reservas.every((r: any) => r.duracion === 90));
++  const anterior = estado.reservas.find((r: any) => r.id === "R-0520");
++  const obtenida = await api.pedir("GET", "/api/reservas/R-0520");
++  assert.deepEqual(obtenida.cuerpo.reserva, anterior);
++  const cancelada = await cancelar(api, anterior.id, true);
++  assert.equal(cancelada.duracion, 90);
++  assert.equal(cancelada.inicio, anterior.inicio);
++  assert.equal(cancelada.fin, anterior.fin);
++  assert.equal(cancelada.importe, anterior.importe);
++});
++
++test("disponibilidad por solapes y huecos máximos ordenados, sin depender del reloj", async (t) => {
++  const api = await preparar(t);
++  assert.deepEqual((await disponibilidad(api)).huecos, [{ inicio: "2026-11-25T09:00", fin: "2026-11-25T22:30" }]);
++  const primera = await crear(api, "2026-11-25T10:00", 60);
++  const segunda = await crear(api, "2026-11-25T11:00", 120);
++  const tercera = await crear(api, "2026-11-25T21:30", 60);
++  assert.equal(primera.status, 201);
++  assert.equal(segunda.status, 201);
++  assert.equal(tercera.status, 201);
++  const d = await disponibilidad(api);
++  assert.deepEqual(d.huecos, [
++    { inicio: "2026-11-25T09:00", fin: "2026-11-25T10:00" },
++    { inicio: "2026-11-25T13:00", fin: "2026-11-25T21:30" },
++  ]);
++  assert.deepEqual(d.franjas.filter((f: any) => f.estado === "reservada").map((f: any) => f.inicio.slice(11)), ["09:00", "10:30", "12:00", "21:00"]);
++  await cancelar(api, primera.cuerpo.reserva.id);
++  assert.deepEqual((await disponibilidad(api)).huecos[0], { inicio: "2026-11-25T09:00", fin: "2026-11-25T11:00" });
++  const cerrada = await disponibilidad(api, "2026-11-25", "pista-4");
++  assert.deepEqual(cerrada.huecos, []);
++  assert.ok(cerrada.franjas.every((f: any) => f.estado === "cerrada"));
++  const antes = await disponibilidad(api);
++  await api.pedir("POST", "/_reloj", { cuerpo: { ahora: "2026-11-26T20:00" } });
++  assert.deepEqual(await disponibilidad(api), antes);
++  const antigua = await disponibilidad(api, "2026-11-19");
++  assert.ok(antigua.huecos.every((h: any) => h.fin <= "2026-11-19T18:00" || h.inicio >= "2026-11-19T21:00"));
++});
++
++test("un día completamente ocupado no tiene huecos", async (t) => {
++  const api = await preparar(t);
++  for (const hora of ["09:00", "10:30", "12:00", "13:30", "15:00", "16:30", "18:00", "19:30", "21:00"]) {
++    assert.equal((await crear(api, `2026-11-25T${hora}`, 90)).status, 201);
++    await api.pedir("POST", "/_reloj", { cuerpo: { ahora: `2026-11-25T${hora}` } });
++  }
++  const d = await disponibilidad(api);
++  assert.deepEqual(d.huecos, []);
++  assert.ok(d.franjas.every((f: any) => f.estado === "reservada"));
++});
++
++test("cuota, pista cerrada, reloj y máximo de tres futuras se aplican a cualquier duración", async (t) => {
++  const api = await preparar(t);
++  for (const duracion of [60, 90, 120]) {
++    for (const [inicio, otros, codigo] of [
++      ["2026-11-25T09:00", { socioId: "socio-011" }, "CUOTA_INACTIVA"],
++      ["2026-11-25T09:00", { pistaId: "pista-4" }, "PISTA_CERRADA"],
++      ["2026-11-18T10:00", {}, "FRANJA_PASADA"],
++    ] as const) {
++      const r = await crear(api, inicio, duracion, otros);
++      assert.equal(r.status, 409);
++      assert.equal(r.cuerpo.error.codigo, codigo);
++    }
++  }
++  for (const [i, duracion] of [60, 90, 120].entries()) {
++    assert.equal((await crear(api, `2026-11-${25 + i}T09:00`, duracion)).status, 201);
++  }
++  const cuarta = await crear(api, "2026-11-28T09:00", 60);
++  assert.equal(cuarta.status, 409);
++  assert.equal(cuarta.cuerpo.error.codigo, "LIMITE_DE_RESERVAS");
++});
++
++test("cancelación gratuita a 24 horas y penalización completa después, en todas las duraciones", async (t) => {
++  const api = await preparar(t);
++  for (const duracion of [60, 90, 120]) {
++    await api.pedir("POST", "/_reloj", { cuerpo: { ahora: "2026-11-24T09:00" } });
++    const gratis = await crear(api, "2026-11-25T09:00", duracion);
++    assert.equal(gratis.status, 201);
++    assert.equal((await cancelar(api, gratis.cuerpo.reserva.id)).penalizacion, undefined);
++    const tarde = await crear(api, "2026-11-25T17:30", duracion);
++    assert.equal(tarde.status, 201);
++    await api.pedir("POST", "/_reloj", { cuerpo: { ahora: "2026-11-24T17:31" } });
++    const rechazada = await api.pedir("POST", `/api/reservas/${tarde.cuerpo.reserva.id}/cancelar`);
++    assert.equal(rechazada.status, 409);
++    assert.equal(rechazada.cuerpo.error.codigo, "FUERA_DE_PLAZO");
++    const forzada = await cancelar(api, tarde.cuerpo.reserva.id, true);
++    assert.equal(forzada.penalizacion, tarde.cuerpo.reserva.importe);
++    assert.equal(forzada.duracion, duracion);
++  }
++});

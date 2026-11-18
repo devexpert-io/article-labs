@@ -1,0 +1,774 @@
+diff --git a/README.md b/README.md
+index 256e5c2..dae224b 100644
+--- a/README.md
++++ b/README.md
+@@ -26,6 +26,24 @@ En el club siempre es miércoles 18 de noviembre de 2026 a las 10:00, salvo que
+ - No se reservan pistas cerradas ni franjas que ya han empezado.
+ - Cancelar es gratis hasta 24 horas antes. Después, solo con `forzar: true`, y se cobra una penalización del 100 % del importe.
+ 
++### Descuentos
++
++Al reservar se admite un único `codigo` de texto, sin distinguir mayúsculas ni espacios alrededor. Se guardan `importeBase`, `descuento` e `importe` en céntimos y `codigo` normalizado si se usó. Sin código, el descuento es 0. Las reservas existentes no se modifican. El importe final nunca baja de 0; disponibilidad sigue mostrando el precio base y la penalización se calcula sobre lo pagado.
++
++| Código | Descuento | Condiciones |
++|---|---|---|
++| `BIENVENIDA` | 50 % | Primera reserva del socio, sin ninguna anterior en ningún estado. Hora del club hasta el 31/12/2026 incluido. |
++| `MANANAS` | 400 céntimos | Lunes a viernes, inicio antes de las 12:00. Sin caducidad ni límite de usos. |
++| `CLUB10` | 10 % | Máximo 3 reservas por socio con este código entre confirmadas y no presentadas; canceladas no cuentan. |
++
++Los porcentajes se redondean al céntimo más próximo. Primero se comprueban las reglas del club; un intento fallido no consume el código.
++
++### Lista de espera
++
++Cada socio puede tener como máximo 2 esperas activas en franjas ocupadas, futuras, válidas y de pistas operativas, con cuota al día. No puede esperar su propia reserva ni duplicar una espera. La posición empieza en 1 y se recalcula por orden de llegada entre las esperas activas de la misma pista e inicio.
++
++Al cancelar se reserva automáticamente para el primero que cumple las reglas normales, al precio base y con la nota `Asignada desde la lista de espera`. Quienes ya no pueden reservar quedan `descartada` y se prueba con el siguiente. Al empezar la franja sus esperas caducan como `descartada`, dejan de aparecer y de contar para el límite. No se envían avisos.
++
+ ## API
+ 
+ ### Pistas
+@@ -44,12 +62,23 @@ En el club siempre es miércoles 18 de noviembre de 2026 a las 10:00, salvo que
+ ### Reservas
+ 
+ - `GET /api/reservas`: lista reservas con filtros opcionales `fecha`, `desde`, `hasta` (por día de inicio, ambos incluidos), `socio`, `pista` y `estado` (`confirmada`, `cancelada` o `no_presentada`), paginada con `limite` (1 a 100, 50 por defecto) y `pagina`. Responde `{ total, pagina, paginas, reservas }`.
++- `GET /api/reservas/exportar?desde=AAAA-MM-DD&hasta=AAAA-MM-DD[&estado=confirmada|cancelada|no_presentada]`: solo gestores con `X-Socio`. Ambos días incluidos, máximo 92 días. Devuelve todas las reservas ordenadas por inicio y pista, sin paginación, en CSV RFC 4180 con CRLF final; columnas `id,fecha,hora,pista,socio,email,estado,importe,penalizacion,notas`. Incluye nombre de pista, nombre y email del socio e importes en euros con dos decimales (penalización vacía si no existe). Cabeceras: `content-type: text/csv; charset=utf-8` y `content-disposition: attachment; filename="reservas-<desde>-<hasta>.csv"`. Errores: `401 NO_IDENTIFICADO`, `403 SIN_PERMISO`, `400 DATOS_INVALIDOS` (fechas ausentes, inválidas o invertidas, estado inválido), `400 RANGO_DEMASIADO_GRANDE`.
+ - `GET /api/reservas/:id`: una reserva. Responde `{ reserva }`.
+-- `POST /api/reservas` con `{ socioId, pistaId, inicio, notas? }`: crea una reserva. Responde `201 { reserva }`. Errores: `SOCIO_NO_ENCONTRADO`, `PISTA_NO_ENCONTRADA`, `FRANJA_INVALIDA`, `CUOTA_INACTIVA`, `PISTA_CERRADA`, `FRANJA_PASADA`, `FRANJA_NO_DISPONIBLE` y `LIMITE_DE_RESERVAS`.
+-- `POST /api/reservas/:id/cancelar` con `{ forzar?, motivo? }`: cancela una reserva. Responde `{ reserva }`. Errores: `RESERVA_NO_ENCONTRADA`, `YA_CANCELADA`, `RESERVA_PASADA` y `FUERA_DE_PLAZO`.
++- `POST /api/reservas` con `{ socioId, pistaId, inicio, notas?, codigo? }`: crea una reserva. Responde `201 { reserva }`. Errores: `SOCIO_NO_ENCONTRADO`, `PISTA_NO_ENCONTRADA`, `FRANJA_INVALIDA`, `CUOTA_INACTIVA`, `PISTA_CERRADA`, `FRANJA_PASADA`, `FRANJA_NO_DISPONIBLE`, `LIMITE_DE_RESERVAS`, `400 DATOS_INVALIDOS` (código no textual), `400 CODIGO_INVALIDO` (fuera del catálogo) y `409 CODIGO_NO_APLICABLE` (no cumple condiciones).
++- `POST /api/reservas/:id/cancelar` con `{ forzar?, motivo? }`: cancela una reserva. Responde `{ reserva, asignadaA }`, donde `asignadaA` es el id de la reserva creada desde la lista de espera o `null`. Errores: `RESERVA_NO_ENCONTRADA`, `YA_CANCELADA`, `RESERVA_PASADA` y `FUERA_DE_PLAZO`.
++
++Las reservas nuevas devuelven también `importeBase`, `descuento` y, si se usó, `codigo`, tanto en el listado como en el detalle.
+ 
+ Una reserva tiene `id`, `socioId`, `pistaId`, `inicio`, `fin`, `estado`, `importe`, `notas` y, si se canceló, `penalizacion` y `motivoCancelacion`.
+ 
++### Esperas
++
++Todos estos endpoints requieren `X-Socio` (`401 NO_IDENTIFICADO` si falta). Una espera tiene `id`, `socioId`, `pistaId`, `inicio`, `estado` (`activa`, `retirada`, `asignada`, `descartada`) y `posicion` solo mientras está activa.
++
++- `POST /api/esperas` con `{ pistaId, inicio }`: apunta a quien llama. Responde `201 { espera }`. Errores: `400 DATOS_INVALIDOS`, `404 PISTA_NO_ENCONTRADA`, `400 FRANJA_INVALIDA`, `409 CUOTA_INACTIVA`, `409 PISTA_CERRADA`, `409 FRANJA_PASADA`, `409 FRANJA_LIBRE`, `409 YA_EN_ESPERA`, `409 YA_RESERVADA`, `409 LIMITE_DE_ESPERAS`.
++- `GET /api/esperas[?socio=<id>]`: responde `{ esperas }` con las activas del propio socio y su posición actual. Solo un gestor puede consultar las de otro socio (`403 SIN_PERMISO`).
++- `DELETE /api/esperas/:id`: retira una espera activa propia o, para un gestor, de cualquier socio. Responde `200 { espera }`. Errores: `403 SIN_PERMISO`, `404 ESPERA_NO_ENCONTRADA`. Las esperas que ya terminaron conservan su estado.
++
+ ### Solo para pruebas
+ 
+ - `GET /_estado`: el estado completo del club.
+diff --git a/src/nucleo.ts b/src/nucleo.ts
+index 62ed37b..7e81de7 100644
+--- a/src/nucleo.ts
++++ b/src/nucleo.ts
+@@ -1,6 +1,6 @@
+ // Las operaciones del club y sus reglas. La API HTTP (src/servidor.ts) es la única que las llama.
+-import { finDeFranja, HORAS, precio } from "./semilla.ts";
+-import type { Estado, EstadoReserva, Reserva } from "./tipos.ts";
++import { diaDeLaSemana, finDeFranja, HORAS, precio } from "./semilla.ts";
++import type { Estado, EstadoReserva, Espera, Reserva } from "./tipos.ts";
+ 
+ export class ErrorDelClub extends Error {
+   codigo: string;
+@@ -56,7 +56,69 @@ export function crearClub(estado: Estado) {
+   const ocupada = (pistaId: string, inicio: string) =>
+     estado.reservas.some((r) => r.pistaId === pistaId && r.inicio === inicio && r.estado === "confirmada");
+ 
++  const comprobarFranja = (socioId: string, pistaId: string, inicio: string) => {
++    const socio = estado.socios.find((s) => s.id === socioId);
++    if (!socio) throw new ErrorDelClub("SOCIO_NO_ENCONTRADO", `No existe el socio ${socioId}`, 404);
++    const p = pista(pistaId);
++    if (!FECHA_HORA.test(inicio) || !HORAS.includes(inicio.slice(11))) {
++      throw new ErrorDelClub("FRANJA_INVALIDA", `inicio debe ser AAAA-MM-DDTHH:MM y empezar a una de estas horas: ${HORAS.join(", ")}`, 400);
++    }
++    if (!socio.cuotaActiva) throw new ErrorDelClub("CUOTA_INACTIVA", `${socio.nombre} no tiene la cuota al día`);
++    if (p.estado === "cerrada") throw new ErrorDelClub("PISTA_CERRADA", `${p.nombre} está cerrada`);
++    if (inicio <= estado.ahora) throw new ErrorDelClub("FRANJA_PASADA", "Esa franja ya ha empezado o ha pasado");
++    return { socio, p };
++  };
++  const caducarEsperas = () => {
++    for (const espera of estado.esperas) {
++      if (espera.estado === "activa" && espera.inicio <= estado.ahora) espera.estado = "descartada";
++    }
++  };
++  const conPosicion = (espera: Espera) => ({
++    ...espera,
++    ...(espera.estado === "activa" ? {
++      posicion: estado.esperas.filter((e) => e.estado === "activa" && e.pistaId === espera.pistaId && e.inicio === espera.inicio)
++        .findIndex((e) => e.id === espera.id) + 1,
++    } : {}),
++  });
++
+   return {
++    caducarEsperas,
++
++    crearEspera(socioId: string, datos: { pistaId?: unknown; inicio?: unknown }) {
++      caducarEsperas();
++      const { pistaId, inicio } = datos;
++      if (typeof pistaId !== "string" || typeof inicio !== "string") invalido("pistaId e inicio son obligatorios");
++      comprobarFranja(socioId, pistaId, inicio);
++      const ocupante = estado.reservas.find((r) => r.pistaId === pistaId && r.inicio === inicio && r.estado === "confirmada");
++      if (!ocupante) throw new ErrorDelClub("FRANJA_LIBRE", "La franja se puede reservar directamente");
++      if (ocupante.socioId === socioId) throw new ErrorDelClub("YA_RESERVADA", "Ya tienes reservada esa franja");
++      const activas = estado.esperas.filter((e) => e.socioId === socioId && e.estado === "activa");
++      if (activas.some((e) => e.pistaId === pistaId && e.inicio === inicio)) {
++        throw new ErrorDelClub("YA_EN_ESPERA", "Ya estás en la lista de esa franja");
++      }
++      if (activas.length >= 2) throw new ErrorDelClub("LIMITE_DE_ESPERAS", "Ya tienes dos esperas activas");
++      const espera: Espera = {
++        id: `E-${String(++estado.contadorEsperas).padStart(4, "0")}`,
++        socioId, pistaId, inicio, estado: "activa",
++      };
++      estado.esperas.push(espera);
++      return { espera: conPosicion(espera) };
++    },
++
++    listarEsperas(socioId: string) {
++      caducarEsperas();
++      return { esperas: estado.esperas.filter((e) => e.socioId === socioId && e.estado === "activa").map(conPosicion) };
++    },
++
++    retirarEspera(id: string, socioId: string, gestor: boolean) {
++      caducarEsperas();
++      const espera = estado.esperas.find((e) => e.id === id);
++      if (!espera) throw new ErrorDelClub("ESPERA_NO_ENCONTRADA", "No existe esa espera", 404);
++      if (espera.socioId !== socioId && !gestor) throw new ErrorDelClub("SIN_PERMISO", "La espera pertenece a otro socio", 403);
++      if (espera.estado === "activa") espera.estado = "retirada";
++      return { espera: conPosicion(espera) };
++    },
++
+     listarPistas() {
+       return { pistas: estado.pistas };
+     },
+@@ -121,39 +183,81 @@ export function crearClub(estado: Estado) {
+       return { total: todas.length, pagina, paginas, reservas: todas.slice((pagina - 1) * limite, pagina * limite) };
+     },
+ 
++    exportarReservas(desde?: string, hasta?: string, filtroEstado?: string) {
++      const fechaValida = (valor: string | undefined): valor is string =>
++        valor !== undefined && FECHA.test(valor) &&
++        Number.isFinite(Date.parse(valor + "T00:00:00Z")) &&
++        new Date(valor + "T00:00:00Z").toISOString().slice(0, 10) === valor;
++      if (!fechaValida(desde) || !fechaValida(hasta) || desde > hasta) {
++        invalido("desde y hasta son obligatorios, con fechas válidas y en orden");
++      }
++      if ((Date.parse(hasta) - Date.parse(desde)) / 86_400_000 + 1 > 92) {
++        throw new ErrorDelClub("RANGO_DEMASIADO_GRANDE", "El periodo no puede superar 92 días", 400);
++      }
++      if (filtroEstado !== undefined && !["confirmada", "cancelada", "no_presentada"].includes(filtroEstado)) {
++        invalido("estado no válido");
++      }
++      const escapar = (valor: string) => /[,"\r\n]/.test(valor) ? '"' + valor.replace(/"/g, '""') + '"' : valor;
++      const filas = estado.reservas
++        .filter((r) => r.inicio.slice(0, 10) >= desde && r.inicio.slice(0, 10) <= hasta &&
++          (filtroEstado === undefined || r.estado === filtroEstado))
++        .sort((a, b) => a.inicio.localeCompare(b.inicio) || a.pistaId.localeCompare(b.pistaId))
++        .map((r) => {
++          const socio = estado.socios.find((s) => s.id === r.socioId)!;
++          return [r.id, r.inicio.slice(0, 10), r.inicio.slice(11), pista(r.pistaId).nombre,
++            socio.nombre, socio.email, r.estado, (r.importe / 100).toFixed(2),
++            r.penalizacion === undefined ? "" : (r.penalizacion / 100).toFixed(2), r.notas]
++            .map(escapar).join(",");
++        });
++      return ["id,fecha,hora,pista,socio,email,estado,importe,penalizacion,notas", ...filas].join("\r\n") + "\r\n";
++    },
++
+     obtenerReserva(id: string) {
+       return { reserva: reserva(id) };
+     },
+ 
+-    crearReserva(datos: { socioId?: unknown; pistaId?: unknown; inicio?: unknown; notas?: unknown }) {
++    crearReserva(datos: { socioId?: unknown; pistaId?: unknown; inicio?: unknown; notas?: unknown; codigo?: unknown }) {
+       const { socioId, pistaId, inicio } = datos;
+       if (typeof socioId !== "string" || typeof pistaId !== "string" || typeof inicio !== "string") {
+         invalido("socioId, pistaId e inicio son obligatorios");
+       }
+       if (datos.notas !== undefined && typeof datos.notas !== "string") invalido("notas debe ser un texto");
+-      const socio = estado.socios.find((s) => s.id === socioId);
+-      if (!socio) throw new ErrorDelClub("SOCIO_NO_ENCONTRADO", `No existe el socio ${socioId}`, 404);
+-      const p = pista(pistaId as string);
+-      if (!FECHA_HORA.test(inicio as string) || !HORAS.includes((inicio as string).slice(11))) {
+-        throw new ErrorDelClub("FRANJA_INVALIDA", `inicio debe ser AAAA-MM-DDTHH:MM y empezar a una de estas horas: ${HORAS.join(", ")}`, 400);
+-      }
+-      if (!socio.cuotaActiva) throw new ErrorDelClub("CUOTA_INACTIVA", `${socio.nombre} no tiene la cuota al día`);
+-      if (p.estado === "cerrada") throw new ErrorDelClub("PISTA_CERRADA", `${p.nombre} está cerrada`);
+-      if ((inicio as string) <= estado.ahora) throw new ErrorDelClub("FRANJA_PASADA", "Esa franja ya ha empezado o ha pasado");
+-      if (ocupada(p.id, inicio as string)) throw new ErrorDelClub("FRANJA_NO_DISPONIBLE", "Esa franja ya está reservada");
++      const { socio, p } = comprobarFranja(socioId, pistaId, inicio);
++      if (ocupada(p.id, inicio)) throw new ErrorDelClub("FRANJA_NO_DISPONIBLE", "Esa franja ya está reservada");
+       const futuras = estado.reservas.filter((r) => r.socioId === socio.id && r.estado === "confirmada" && r.inicio > estado.ahora);
+       if (futuras.length >= MAXIMO_RESERVAS_FUTURAS) {
+         throw new ErrorDelClub("LIMITE_DE_RESERVAS", `${socio.nombre} ya tiene ${MAXIMO_RESERVAS_FUTURAS} reservas futuras`);
+       }
++      const importeBase = precio(p, inicio);
++      let descuento = 0;
++      let codigo: string | undefined;
++      if (datos.codigo !== undefined) {
++        if (typeof datos.codigo !== "string") invalido("codigo debe ser un texto");
++        codigo = datos.codigo.trim().toUpperCase();
++        if (!["BIENVENIDA", "MANANAS", "CLUB10"].includes(codigo)) {
++          throw new ErrorDelClub("CODIGO_INVALIDO", "El código no existe", 400);
++        }
++        const anteriores = estado.reservas.filter((r) => r.socioId === socio.id);
++        const dia = diaDeLaSemana(inicio.slice(0, 10));
++        if ((codigo === "BIENVENIDA" && (anteriores.length > 0 || estado.ahora.slice(0, 10) > "2026-12-31")) ||
++            (codigo === "MANANAS" && (dia === 0 || dia === 6 || inicio.slice(11) >= "12:00")) ||
++            (codigo === "CLUB10" && anteriores.filter((r) => r.codigo === "CLUB10" && r.estado !== "cancelada").length >= 3)) {
++          throw new ErrorDelClub("CODIGO_NO_APLICABLE", "No se cumplen las condiciones del código");
++        }
++        descuento = Math.min(importeBase, codigo === "MANANAS" ? 400 : Math.round(importeBase * (codigo === "BIENVENIDA" ? 0.5 : 0.1)));
++      }
+       estado.contador += 1;
+       const nueva: Reserva = {
+         id: `R-${String(estado.contador).padStart(4, "0")}`,
+         socioId: socio.id,
+         pistaId: p.id,
+-        inicio: inicio as string,
+-        fin: finDeFranja(inicio as string),
++        inicio: inicio,
++        fin: finDeFranja(inicio),
+         estado: "confirmada",
+-        importe: precio(p, inicio as string),
++        importeBase,
++        descuento,
++        importe: importeBase - descuento,
++        ...(codigo ? { codigo } : {}),
+         notas: (datos.notas as string | undefined) ?? "",
+       };
+       estado.reservas.push(nueva);
+@@ -178,7 +282,23 @@ export function crearClub(estado: Estado) {
+       }
+       r.estado = "cancelada";
+       if (typeof datos.motivo === "string") r.motivoCancelacion = datos.motivo;
+-      return { reserva: r };
++      caducarEsperas();
++      let asignadaA: string | null = null;
++      for (const espera of estado.esperas.filter((e) => e.estado === "activa" && e.pistaId === r.pistaId && e.inicio === r.inicio)) {
++        try {
++          const nueva = this.crearReserva({
++            socioId: espera.socioId, pistaId: r.pistaId, inicio: r.inicio,
++            notas: "Asignada desde la lista de espera",
++          }).reserva;
++          espera.estado = "asignada";
++          asignadaA = nueva.id;
++          break;
++        } catch (error) {
++          if (!(error instanceof ErrorDelClub)) throw error;
++          espera.estado = "descartada";
++        }
++      }
++      return { reserva: r, asignadaA };
+     },
+   };
+ }
+diff --git a/src/semilla.ts b/src/semilla.ts
+index bc45cc7..983409b 100644
+--- a/src/semilla.ts
++++ b/src/semilla.ts
+@@ -158,5 +158,5 @@ export function crearSemilla(): Estado {
+   socios.push({ id: "socio-041", nombre: "Nora Benítez", email: "nora.benitez@example.com", cuotaActiva: true, rol: "socio" });
+ 
+   reservas.sort((a, b) => (a.inicio === b.inicio ? a.pistaId.localeCompare(b.pistaId) : a.inicio.localeCompare(b.inicio)));
+-  return { ahora: AHORA, pistas: PISTAS.map((p) => ({ ...p })), socios, reservas, registro: [], contador };
++  return { ahora: AHORA, pistas: PISTAS.map((p) => ({ ...p })), socios, reservas, esperas: [], contadorEsperas: 0, registro: [], contador };
+ }
+diff --git a/src/servidor.ts b/src/servidor.ts
+index a6a7764..ae10204 100644
+--- a/src/servidor.ts
++++ b/src/servidor.ts
+@@ -42,16 +42,35 @@ function identificar(req: IncomingMessage): Socio | undefined {
+   return socio;
+ }
+ 
+-type Operacion = { nombre: string; argumentos: unknown; ejecutar: () => unknown };
++type Operacion = { nombre: string; argumentos: unknown; ejecutar: () => unknown; csv?: { desde: string; hasta: string } };
+ 
+-// `quien` es el socio que hace la petición (cabecera X-Socio). Las operaciones actuales no lo usan.
+-async function resolver(req: IncomingMessage, url: URL, _quien: Socio | undefined): Promise<Operacion> {
++// La identidad se exige en las operaciones con permisos.
++async function resolver(req: IncomingMessage, url: URL, quien: Socio | undefined): Promise<Operacion> {
+   const metodo = req.method ?? "GET";
+   const partes = url.pathname.split("/").filter(Boolean);
+   const q = url.searchParams;
+   if (partes[0] !== "api") throw new ErrorDelClub("RUTA_NO_ENCONTRADA", `No existe ${url.pathname}`, 404);
+   const [, recurso, id, accion] = partes;
+ 
++  if (recurso === "esperas") {
++    if (!quien) throw new ErrorDelClub("NO_IDENTIFICADO", "Se requiere X-Socio", 401);
++    if (!id && metodo === "POST") {
++      const cuerpo = await leerCuerpo(req);
++      return { nombre: "crearEspera", argumentos: { ...cuerpo, socioId: quien.id },
++        ejecutar: () => club.crearEspera(quien.id, cuerpo) };
++    }
++    if (!id && metodo === "GET") {
++      const socioId = q.get("socio") ?? quien.id;
++      if (socioId !== quien.id && quien.rol !== "gestor") {
++        throw new ErrorDelClub("SIN_PERMISO", "Solo un gestor puede consultar las esperas de otro socio", 403);
++      }
++      return { nombre: "listarEsperas", argumentos: { socioId }, ejecutar: () => club.listarEsperas(socioId) };
++    }
++    if (id && !accion && metodo === "DELETE") {
++      return { nombre: "retirarEspera", argumentos: { esperaId: id },
++        ejecutar: () => club.retirarEspera(id, quien.id, quien.rol === "gestor") };
++    }
++  }
+   if (recurso === "pistas" && !id && metodo === "GET") {
+     return { nombre: "listarPistas", argumentos: {}, ejecutar: () => club.listarPistas() };
+   }
+@@ -84,6 +103,16 @@ async function resolver(req: IncomingMessage, url: URL, _quien: Socio | undefine
+     const cuerpo = await leerCuerpo(req);
+     return { nombre: "crearReserva", argumentos: cuerpo, ejecutar: () => club.crearReserva(cuerpo) };
+   }
++  if (recurso === "reservas" && id === "exportar" && !accion && metodo === "GET") {
++    if (!quien) throw new ErrorDelClub("NO_IDENTIFICADO", "Se requiere X-Socio", 401);
++    if (quien.rol !== "gestor") throw new ErrorDelClub("SIN_PERMISO", "Solo los gestores pueden exportar", 403);
++    const desde = q.get("desde") ?? undefined;
++    const hasta = q.get("hasta") ?? undefined;
++    const filtroEstado = q.get("estado") ?? undefined;
++    return { nombre: "exportarReservas", argumentos: { desde, hasta, estado: filtroEstado },
++      csv: { desde: desde ?? "", hasta: hasta ?? "" },
++      ejecutar: () => club.exportarReservas(desde, hasta, filtroEstado) };
++  }
+   if (recurso === "reservas" && id && !accion && metodo === "GET") {
+     return { nombre: "obtenerReserva", argumentos: { reservaId: id }, ejecutar: () => club.obtenerReserva(id) };
+   }
+@@ -110,6 +139,7 @@ const servidor = createServer(async (req, res) => {
+         return responder(400, { error: { codigo: "DATOS_INVALIDOS", mensaje: "ahora debe tener el formato AAAA-MM-DDTHH:MM" } });
+       }
+       estado.ahora = ahora;
++      club.caducarEsperas();
+       return responder(200, { ahora });
+     } catch {
+       return responder(400, { error: { codigo: "DATOS_INVALIDOS", mensaje: "El cuerpo debe ser un objeto JSON" } });
+@@ -131,7 +161,15 @@ const servidor = createServer(async (req, res) => {
+     operacion = await resolver(req, url, quien);
+     const resultado = operacion.ejecutar();
+     anotar(true);
+-    responder(operacion.nombre === "crearReserva" ? 201 : 200, resultado);
++    if (operacion.csv) {
++      res.writeHead(200, {
++        "content-type": "text/csv; charset=utf-8",
++        "content-disposition": `attachment; filename="reservas-${operacion.csv.desde}-${operacion.csv.hasta}.csv"`,
++      });
++      res.end(resultado as string);
++    } else {
++      responder(["crearReserva", "crearEspera"].includes(operacion.nombre) ? 201 : 200, resultado);
++    }
+   } catch (error) {
+     if (error instanceof ErrorDelClub) {
+       anotar(false, error.codigo);
+diff --git a/src/tipos.ts b/src/tipos.ts
+index 41e5915..30a4a4b 100644
+--- a/src/tipos.ts
++++ b/src/tipos.ts
+@@ -28,12 +28,24 @@ export interface Reserva {
+   estado: EstadoReserva;
+   /** Céntimos de euro. */
+   importe: number;
++  /** Importes en céntimos, presentes en las reservas nuevas. */
++  importeBase?: number;
++  descuento?: number;
++  codigo?: string;
+   notas: string;
+   /** Céntimos cobrados al cancelar fuera de plazo. */
+   penalizacion?: number;
+   motivoCancelacion?: string;
+ }
+ 
++export interface Espera {
++  id: string;
++  socioId: string;
++  pistaId: string;
++  inicio: string;
++  estado: "activa" | "retirada" | "asignada" | "descartada";
++}
++
+ export interface EntradaRegistro {
+   n: number;
+   operacion: string;
+@@ -47,6 +59,8 @@ export interface Estado {
+   pistas: Pista[];
+   socios: Socio[];
+   reservas: Reserva[];
++  esperas: Espera[];
++  contadorEsperas: number;
+   registro: EntradaRegistro[];
+   contador: number;
+ }
+diff --git a/test/codigos-descuento.test.ts b/test/codigos-descuento.test.ts
+new file mode 100644
+index 0000000..a3d7f79
+--- /dev/null
++++ b/test/codigos-descuento.test.ts
+@@ -0,0 +1,123 @@
++import assert from "node:assert/strict";
++import { test } from "node:test";
++import { arrancarApi, type Api } from "./ayuda.ts";
++import { crearClub } from "../src/nucleo.ts";
++import { crearSemilla } from "../src/semilla.ts";
++
++const crear = (api: Api, inicio: string, codigo?: unknown, socioId = "socio-041", pistaId = "pista-1") =>
++  api.pedir("POST", "/api/reservas", { cuerpo: { socioId, pistaId, inicio, ...(codigo === undefined ? {} : { codigo }) } });
++
++test("descuentos: importes guardados, normalización, lectura y disponibilidad base", async (t) => {
++  const api = await arrancarApi();
++  t.after(() => api.cerrar());
++  for (const [i, codigo, descuento] of [[1, " bienvenida ", 900], [2, "  club10 ", 180], [3, undefined, 0]] as const) {
++    const r = await crear(api, "2026-12-0" + i + "T09:00", codigo);
++    assert.equal(r.status, 201);
++    const reserva = r.cuerpo.reserva;
++    assert.equal(reserva.importeBase, 1800);
++    assert.equal(reserva.descuento, descuento);
++    assert.equal(reserva.importe, 1800 - descuento);
++    assert.equal(reserva.codigo, codigo?.trim().toUpperCase());
++    assert.equal(Object.hasOwn(reserva, "codigo"), codigo !== undefined);
++    assert.deepEqual((await api.pedir("GET", "/api/reservas/" + reserva.id)).cuerpo.reserva, reserva);
++    assert.ok((await api.pedir("GET", "/api/reservas?socio=socio-041")).cuerpo.reservas.some((r: any) => JSON.stringify(r) === JSON.stringify(reserva)));
++    const disponibilidad = await api.pedir("GET", "/api/disponibilidad?fecha=2026-12-0" + i + "&pista=pista-1");
++    assert.equal(disponibilidad.cuerpo.pistas[0].franjas[0].precio, 1800);
++  }
++});
++
++test("BIENVENIDA: historial en cualquier estado y vencimiento por reloj del club", async (t) => {
++  const api = await arrancarApi();
++  t.after(() => api.cerrar());
++  const usada = await crear(api, "2026-12-01T09:00", "BIENVENIDA");
++  await api.pedir("POST", "/api/reservas/" + usada.cuerpo.reserva.id + "/cancelar");
++  assert.equal((await crear(api, "2026-12-02T09:00", "BIENVENIDA")).cuerpo.error.codigo, "CODIGO_NO_APLICABLE");
++  assert.equal((await crear(api, "2026-12-02T09:00", "BIENVENIDA", "socio-002")).cuerpo.error.codigo, "CODIGO_NO_APLICABLE");
++  for (const ahora of ["2026-12-31T23:59", "2027-01-01T00:00"]) {
++    const otra = await arrancarApi({ AHORA: ahora });
++    t.after(() => otra.cerrar());
++    const r = await crear(otra, "2027-01-04T09:00", "BIENVENIDA");
++    assert.equal(r.status, ahora.startsWith("2026") ? 201 : 409);
++    if (r.status === 409) assert.equal(r.cuerpo.error.codigo, "CODIGO_NO_APLICABLE");
++  }
++});
++
++test("MANANAS: lunes a viernes antes de mediodía y penalización del importe descontado", async (t) => {
++  const api = await arrancarApi();
++  t.after(() => api.cerrar());
++  for (const inicio of ["2026-11-28T09:00", "2026-11-29T10:30", "2026-11-30T12:00", "2026-11-30T18:00"]) {
++    const r = await crear(api, inicio, "MANANAS");
++    assert.equal(r.status, 409);
++    assert.equal(r.cuerpo.error.codigo, "CODIGO_NO_APLICABLE");
++  }
++  for (const inicio of ["2026-11-30T09:00", "2026-12-01T10:30", "2026-12-04T09:00"]) {
++    const r = await crear(api, inicio, "MANANAS");
++    assert.equal(r.status, 201);
++    assert.equal(r.cuerpo.reserva.descuento, 400);
++    assert.equal(r.cuerpo.reserva.importe, 1400);
++    await api.pedir("POST", "/_reloj", { cuerpo: { ahora: inicio.slice(0, 10) + "T08:00" } });
++    const cancelar = await api.pedir("POST", "/api/reservas/" + r.cuerpo.reserva.id + "/cancelar", { cuerpo: { forzar: true } });
++    assert.equal(cancelar.cuerpo.reserva.penalizacion, 1400);
++  }
++});
++
++test("CLUB10: tres usos históricos, las cancelaciones liberan uso", async (t) => {
++  const api = await arrancarApi();
++  t.after(() => api.cerrar());
++  const ids: string[] = [];
++  for (let dia = 1; dia <= 3; dia++) {
++    const r = await crear(api, "2026-12-0" + dia + "T09:00", "CLUB10");
++    assert.equal(r.status, 201);
++    ids.push(r.cuerpo.reserva.id);
++  }
++  // Se pasan las reservas sin cancelarlas: ya no bloquea el límite de futuras.
++  await api.pedir("POST", "/_reloj", { cuerpo: { ahora: "2026-12-03T12:00" } });
++  const cuarta = await crear(api, "2026-12-04T09:00", "CLUB10");
++  assert.equal(cuarta.status, 409);
++  assert.equal(cuarta.cuerpo.error.codigo, "CODIGO_NO_APLICABLE");
++  await api.pedir("POST", "/_reloj", { cuerpo: { ahora: "2026-11-18T10:00" } });
++  await api.pedir("POST", "/api/reservas/" + ids[0] + "/cancelar");
++  assert.equal((await crear(api, "2026-12-04T09:00", "CLUB10")).status, 201);
++});
++
++test("códigos: formato, un único código y reglas de reserva prioritarias, sin consumir usos", async (t) => {
++  const api = await arrancarApi();
++  t.after(() => api.cerrar());
++  for (const codigo of [null, 10, true, ["CLUB10", "MANANAS"], { codigo: "CLUB10" }, "", "OTRO", "CLUB10 MANANAS"]) {
++    const r = await crear(api, "2026-12-01T09:00", codigo);
++    assert.equal(r.status, 400);
++    assert.equal(r.cuerpo.error.codigo, typeof codigo === "string" ? "CODIGO_INVALIDO" : "DATOS_INVALIDOS");
++  }
++  for (const [inicio, socio, pista, error] of [
++    ["2026-12-01T09:00", "socio-011", "pista-1", "CUOTA_INACTIVA"],
++    ["2026-12-01T09:00", "socio-041", "pista-4", "PISTA_CERRADA"],
++    ["2026-12-01T09:15", "socio-041", "pista-1", "FRANJA_INVALIDA"],
++    ["2026-11-18T09:00", "socio-041", "pista-1", "FRANJA_PASADA"],
++    ["2026-11-19T19:30", "socio-041", "pista-1", "FRANJA_NO_DISPONIBLE"],
++  ]) {
++    assert.equal((await crear(api, inicio!, "OTRO", socio!, pista!)).cuerpo.error.codigo, error);
++  }
++  assert.equal((await crear(api, "2026-12-01T09:00", "BIENVENIDA")).status, 201);
++  await crear(api, "2026-12-02T09:00");
++  await crear(api, "2026-12-03T09:00");
++  assert.equal((await crear(api, "2026-12-04T09:00", "OTRO")).cuerpo.error.codigo, "LIMITE_DE_RESERVAS");
++});
++
++test("condiciones con estados no presentados, redondeo y suelo del descuento", () => {
++  const estado = crearSemilla();
++  const club = crearClub(estado);
++  const primera = club.crearReserva({ socioId: "socio-041", pistaId: "pista-1", inicio: "2026-12-01T09:00", codigo: "CLUB10" }).reserva;
++  primera.estado = "no_presentada";
++  assert.throws(() => club.crearReserva({ socioId: "socio-041", pistaId: "pista-1", inicio: "2026-12-02T09:00", codigo: "BIENVENIDA" }), { codigo: "CODIGO_NO_APLICABLE" });
++  club.crearReserva({ socioId: "socio-041", pistaId: "pista-1", inicio: "2026-12-02T09:00", codigo: "CLUB10" });
++  club.crearReserva({ socioId: "socio-041", pistaId: "pista-1", inicio: "2026-12-03T09:00", codigo: "CLUB10" });
++  assert.throws(() => club.crearReserva({ socioId: "socio-041", pistaId: "pista-1", inicio: "2026-12-04T09:00", codigo: "CLUB10" }), { codigo: "CODIGO_NO_APLICABLE" });
++  estado.pistas[0]!.precioValle = 101;
++  const barata = club.crearReserva({ socioId: "socio-002", pistaId: "pista-1", inicio: "2026-12-04T09:00", codigo: "MANANAS" }).reserva;
++  assert.equal(barata.importe, 0);
++  assert.equal(barata.descuento, 101);
++  estado.pistas[0]!.precioValle = 105;
++  const redondeada = club.crearReserva({ socioId: "socio-002", pistaId: "pista-1", inicio: "2026-12-07T09:00", codigo: "CLUB10" }).reserva;
++  assert.equal(redondeada.descuento, 11);
++  assert.equal(redondeada.importe, 94);
++});
+diff --git a/test/exportar-csv.test.ts b/test/exportar-csv.test.ts
+new file mode 100644
+index 0000000..5f3dae4
+--- /dev/null
++++ b/test/exportar-csv.test.ts
+@@ -0,0 +1,74 @@
++import assert from "node:assert/strict";
++import { test } from "node:test";
++import { arrancarApi } from "./ayuda.ts";
++
++const cabecera = "id,fecha,hora,pista,socio,email,estado,importe,penalizacion,notas\r\n";
++
++test("CSV: permisos, cabeceras, todas las filas ordenadas y listado intacto", async (t) => {
++  const api = await arrancarApi();
++  t.after(() => api.cerrar());
++  const ruta = "/api/reservas/exportar?desde=2026-10-01&hasta=2026-10-31";
++  for (const [socio, status, codigo] of [[undefined, 401, "NO_IDENTIFICADO"], ["socio-041", 403, "SIN_PERMISO"]] as const) {
++    const r = await api.pedir("GET", ruta, { socio });
++    assert.equal(r.status, status);
++    assert.equal(r.cuerpo.error.codigo, codigo);
++  }
++  const antes = (await api.pedir("GET", "/api/reservas?desde=2026-10-01&hasta=2026-10-31")).cuerpo;
++  const r = await api.pedir("GET", ruta, { socio: "socio-040" });
++  assert.equal(r.status, 200);
++  assert.equal(r.cabeceras.get("content-type"), "text/csv; charset=utf-8");
++  assert.equal(r.cabeceras.get("content-disposition"), 'attachment; filename="reservas-2026-10-01-2026-10-31.csv"');
++  assert.ok(r.texto.startsWith(cabecera));
++  assert.ok(r.texto.endsWith("\r\n"));
++  assert.equal(r.texto.replaceAll("\r\n", "").includes("\n"), false);
++  const estado = (await api.pedir("GET", "/_estado")).cuerpo;
++  const esperadas = estado.reservas.filter((r: any) => r.inicio.startsWith("2026-10"))
++    .sort((a: any, b: any) => a.inicio.localeCompare(b.inicio) || a.pistaId.localeCompare(b.pistaId));
++  const filas = r.texto.slice(cabecera.length).trimEnd().split("\r\n");
++  assert.equal(filas.length, 315);
++  for (const [i, reserva] of esperadas.entries()) {
++    const socio = estado.socios.find((s: any) => s.id === reserva.socioId);
++    const pista = estado.pistas.find((p: any) => p.id === reserva.pistaId);
++    assert.equal(filas[i], [reserva.id, reserva.inicio.slice(0, 10), reserva.inicio.slice(11), pista.nombre,
++      socio.nombre, socio.email, reserva.estado, (reserva.importe / 100).toFixed(2), "", ""].join(","));
++  }
++  assert.deepEqual((await api.pedir("GET", "/api/reservas?desde=2026-10-01&hasta=2026-10-31")).cuerpo, antes);
++  for (const estado of ["confirmada", "cancelada", "no_presentada"]) {
++    const filtrada = await api.pedir("GET", ruta + "&estado=" + estado, { socio: "socio-040" });
++    assert.equal(filtrada.texto.split("\r\n").length - 2, esperadas.filter((r: any) => r.estado === estado).length);
++  }
++});
++
++test("CSV: escapado RFC 4180, penalización y periodo vacío", async (t) => {
++  const api = await arrancarApi();
++  t.after(() => api.cerrar());
++  const notas = ['normal', 'una,coma', 'dice "hola"', 'dos\nlíneas', 'dos\rlíneas'];
++  for (const [i, nota] of notas.entries()) {
++    const inicio = "2026-12-0" + (i + 1) + "T09:00";
++    const nueva = await api.pedir("POST", "/api/reservas", { cuerpo: { socioId: "socio-041", pistaId: "pista-1", inicio, notas: nota } });
++    assert.equal(nueva.status, 201);
++    await api.pedir("POST", "/_reloj", { cuerpo: { ahora: inicio.slice(0, 10) + "T08:00" } });
++    await api.pedir("POST", "/api/reservas/" + nueva.cuerpo.reserva.id + "/cancelar", { cuerpo: { forzar: true } });
++    const csv = await api.pedir("GET", "/api/reservas/exportar?desde=" + inicio.slice(0, 10) + "&hasta=" + inicio.slice(0, 10), { socio: "socio-040" });
++    const escapada = i === 0 ? nota : '"' + nota.replaceAll('"', '""') + '"';
++    assert.ok(csv.texto.endsWith(",cancelada," + (nueva.cuerpo.reserva.importe / 100).toFixed(2) + "," +
++      (nueva.cuerpo.reserva.importe / 100).toFixed(2) + "," + escapada + "\r\n"));
++  }
++  assert.equal((await api.pedir("GET", "/api/reservas/exportar?desde=2027-01-01&hasta=2027-01-01", { socio: "socio-040" })).texto, cabecera);
++});
++
++test("CSV: fechas y estados inválidos y límite inclusivo de 92 días", async (t) => {
++  const api = await arrancarApi();
++  t.after(() => api.cerrar());
++  for (const q of ["", "desde=2026-11-01", "hasta=2026-11-01", "desde=x&hasta=2026-11-01",
++    "desde=2026-02-30&hasta=2026-03-01", "desde=2026-11-02&hasta=2026-11-01",
++    "desde=2026-11-01&hasta=2026-11-02&estado=", "desde=2026-11-01&hasta=2026-11-02&estado=otra"]) {
++    const r = await api.pedir("GET", "/api/reservas/exportar?" + q, { socio: "socio-040" });
++    assert.equal(r.status, 400, q);
++    assert.equal(r.cuerpo.error.codigo, "DATOS_INVALIDOS", q);
++  }
++  assert.equal((await api.pedir("GET", "/api/reservas/exportar?desde=2026-10-01&hasta=2026-12-31", { socio: "socio-040" })).status, 200);
++  const larga = await api.pedir("GET", "/api/reservas/exportar?desde=2026-10-01&hasta=2027-01-01", { socio: "socio-040" });
++  assert.equal(larga.status, 400);
++  assert.equal(larga.cuerpo.error.codigo, "RANGO_DEMASIADO_GRANDE");
++});
+diff --git a/test/lista-espera.test.ts b/test/lista-espera.test.ts
+new file mode 100644
+index 0000000..c7f01fa
+--- /dev/null
++++ b/test/lista-espera.test.ts
+@@ -0,0 +1,166 @@
++import assert from "node:assert/strict";
++import { test } from "node:test";
++import { arrancarApi, type Api } from "./ayuda.ts";
++import { crearClub } from "../src/nucleo.ts";
++import { crearSemilla } from "../src/semilla.ts";
++
++const inicios = ["2026-12-01T09:00", "2026-12-02T09:00", "2026-12-03T09:00"];
++async function preparar(api: Api) {
++  const ids: string[] = [];
++  for (const inicio of inicios) {
++    const r = await api.pedir("POST", "/api/reservas", { cuerpo: { socioId: "socio-041", pistaId: "pista-1", inicio } });
++    assert.equal(r.status, 201);
++    ids.push(r.cuerpo.reserva.id);
++  }
++  return ids;
++}
++const apuntar = (api: Api, socio = "socio-002", inicio = inicios[0], pistaId = "pista-1") =>
++  api.pedir("POST", "/api/esperas", { socio, cuerpo: { pistaId, inicio } });
++const comprobarError = (r: any, status: number, codigo: string) => {
++  assert.equal(r.status, status);
++  assert.equal(r.cuerpo.error.codigo, codigo);
++};
++
++test("esperas: identidad, alta, duplicados, reserva propia, límite y validaciones", async (t) => {
++  const api = await arrancarApi();
++  t.after(() => api.cerrar());
++  await preparar(api);
++  for (const [metodo, ruta] of [["POST", "/api/esperas"], ["GET", "/api/esperas"], ["DELETE", "/api/esperas/E-0001"]]) {
++    comprobarError(await api.pedir(metodo!, ruta!), 401, "NO_IDENTIFICADO");
++  }
++  comprobarError(await apuntar(api, "socio-041"), 409, "YA_RESERVADA");
++  for (const [socio, inicio, pista, status, codigo] of [
++    ["socio-002", inicios[0], "pista-999", 404, "PISTA_NO_ENCONTRADA"],
++    ["socio-002", inicios[0], "pista-4", 409, "PISTA_CERRADA"],
++    ["socio-002", "2026-12-01T09:15", "pista-1", 400, "FRANJA_INVALIDA"],
++    ["socio-002", "2026-11-18T09:00", "pista-1", 409, "FRANJA_PASADA"],
++    ["socio-011", inicios[0], "pista-1", 409, "CUOTA_INACTIVA"],
++    ["socio-002", inicios[0], "pista-2", 409, "FRANJA_LIBRE"],
++  ] as const) {
++    comprobarError(await apuntar(api, socio, inicio, pista), status, codigo);
++  }
++  comprobarError(await api.pedir("POST", "/api/esperas", { socio: "socio-002", cuerpo: { pistaId: 1 } }), 400, "DATOS_INVALIDOS");
++  const primera = await apuntar(api);
++  assert.equal(primera.status, 201);
++  assert.deepEqual(primera.cuerpo.espera, { id: "E-0001", socioId: "socio-002", pistaId: "pista-1", inicio: inicios[0], estado: "activa", posicion: 1 });
++  comprobarError(await apuntar(api), 409, "YA_EN_ESPERA");
++  assert.equal((await apuntar(api, "socio-002", inicios[1])).status, 201);
++  comprobarError(await apuntar(api, "socio-002", inicios[2]), 409, "LIMITE_DE_ESPERAS");
++});
++
++test("esperas: posiciones dinámicas, consultas y retirada con permisos", async (t) => {
++  const api = await arrancarApi();
++  t.after(() => api.cerrar());
++  await preparar(api);
++  const primera = (await apuntar(api)).cuerpo.espera;
++  const segunda = (await apuntar(api, "socio-004")).cuerpo.espera;
++  assert.equal(segunda.posicion, 2);
++  const propias = await api.pedir("GET", "/api/esperas", { socio: "socio-004" });
++  assert.deepEqual(propias.cuerpo.esperas, [segunda]);
++  assert.deepEqual((await api.pedir("GET", "/api/esperas?socio=socio-004", { socio: "socio-040" })).cuerpo, propias.cuerpo);
++  comprobarError(await api.pedir("GET", "/api/esperas?socio=socio-004", { socio: "socio-002" }), 403, "SIN_PERMISO");
++  comprobarError(await api.pedir("DELETE", "/api/esperas/" + primera.id, { socio: "socio-004" }), 403, "SIN_PERMISO");
++  comprobarError(await api.pedir("DELETE", "/api/esperas/no-existe", { socio: "socio-040" }), 404, "ESPERA_NO_ENCONTRADA");
++  const retirada = await api.pedir("DELETE", "/api/esperas/" + primera.id, { socio: "socio-002" });
++  assert.equal(retirada.status, 200);
++  assert.equal(retirada.cuerpo.espera.estado, "retirada");
++  assert.equal(Object.hasOwn(retirada.cuerpo.espera, "posicion"), false);
++  assert.deepEqual((await api.pedir("GET", "/api/esperas", { socio: "socio-002" })).cuerpo.esperas, []);
++  assert.equal((await api.pedir("GET", "/api/esperas", { socio: "socio-004" })).cuerpo.esperas[0].posicion, 1);
++  assert.equal((await api.pedir("DELETE", "/api/esperas/" + segunda.id, { socio: "socio-040" })).cuerpo.espera.estado, "retirada");
++  assert.equal((await apuntar(api)).cuerpo.espera.posicion, 1);
++});
++
++test("esperas: asignación FIFO sin descuento, reservas sucesivas y cancelación sin cola", async (t) => {
++  const api = await arrancarApi();
++  t.after(() => api.cerrar());
++  const ids = await preparar(api);
++  const primera = (await apuntar(api)).cuerpo.espera;
++  const segunda = (await apuntar(api, "socio-004")).cuerpo.espera;
++  const cancelar = await api.pedir("POST", "/api/reservas/" + ids[0] + "/cancelar");
++  assert.equal(cancelar.status, 200);
++  assert.equal(cancelar.cuerpo.reserva.estado, "cancelada");
++  assert.equal(cancelar.cuerpo.reserva.penalizacion, undefined);
++  const nueva = (await api.pedir("GET", "/api/reservas/" + cancelar.cuerpo.asignadaA)).cuerpo.reserva;
++  assert.equal(nueva.socioId, "socio-002");
++  assert.equal(nueva.inicio, inicios[0]);
++  assert.equal(nueva.pistaId, "pista-1");
++  assert.equal(nueva.estado, "confirmada");
++  assert.equal(nueva.importe, 1800);
++  assert.equal(nueva.importeBase, 1800);
++  assert.equal(nueva.descuento, 0);
++  assert.equal(nueva.codigo, undefined);
++  assert.equal(nueva.notas, "Asignada desde la lista de espera");
++  const estado = (await api.pedir("GET", "/_estado")).cuerpo;
++  assert.equal(estado.esperas.find((e: any) => e.id === primera.id).estado, "asignada");
++  assert.equal((await api.pedir("GET", "/api/esperas", { socio: "socio-004" })).cuerpo.esperas[0].posicion, 1);
++  const otra = await api.pedir("POST", "/api/reservas/" + nueva.id + "/cancelar");
++  assert.equal((await api.pedir("GET", "/api/reservas/" + otra.cuerpo.asignadaA)).cuerpo.reserva.socioId, segunda.socioId);
++  assert.equal((await api.pedir("POST", "/api/reservas/" + ids[1] + "/cancelar")).cuerpo.asignadaA, null);
++  comprobarError(await api.pedir("POST", "/api/reservas/" + ids[0] + "/cancelar"), 409, "YA_CANCELADA");
++});
++
++test("esperas: cancelar fuera de plazo exige forzar y mantiene la penalización", async (t) => {
++  const api = await arrancarApi();
++  t.after(() => api.cerrar());
++  const creada = await api.pedir("POST", "/api/reservas", { cuerpo: { socioId: "socio-041", pistaId: "pista-1", inicio: "2026-11-19T09:00", codigo: "MANANAS" } });
++  assert.equal(creada.status, 201);
++  const espera = await apuntar(api, "socio-004", "2026-11-19T09:00");
++  assert.equal(espera.status, 201);
++  const ruta = "/api/reservas/" + creada.cuerpo.reserva.id + "/cancelar";
++  comprobarError(await api.pedir("POST", ruta), 409, "FUERA_DE_PLAZO");
++  assert.equal((await api.pedir("GET", "/api/esperas", { socio: "socio-004" })).cuerpo.esperas.length, 1);
++  const cancelar = await api.pedir("POST", ruta, { cuerpo: { forzar: true } });
++  assert.equal(cancelar.cuerpo.reserva.penalizacion, 1400);
++  assert.equal((await api.pedir("GET", "/api/reservas/" + cancelar.cuerpo.asignadaA)).cuerpo.reserva.importe, 1800);
++});
++
++test("esperas: saltar a quien alcanza el límite; ninguno apto deja la pista libre", async (t) => {
++  const api = await arrancarApi();
++  t.after(() => api.cerrar());
++  const ids = await preparar(api);
++  const primera = (await apuntar(api, "socio-004")).cuerpo.espera;
++  await apuntar(api, "socio-002");
++  // Irene tenía una futura: llega a tres después de apuntarse.
++  for (const inicio of ["2026-12-04T09:00", "2026-12-05T09:00"]) {
++    assert.equal((await api.pedir("POST", "/api/reservas", { cuerpo: { socioId: "socio-004", pistaId: "pista-2", inicio } })).status, 201);
++  }
++  const cancelar = await api.pedir("POST", "/api/reservas/" + ids[0] + "/cancelar");
++  assert.equal((await api.pedir("GET", "/api/reservas/" + cancelar.cuerpo.asignadaA)).cuerpo.reserva.socioId, "socio-002");
++  assert.equal((await api.pedir("GET", "/_estado")).cuerpo.esperas.find((e: any) => e.id === primera.id).estado, "descartada");
++  // Se permite apuntarse aun teniendo tres futuras; se comprueba al asignar.
++  assert.equal((await apuntar(api, "socio-004", inicios[1])).status, 201);
++  assert.equal((await api.pedir("POST", "/api/reservas/" + ids[1] + "/cancelar")).cuerpo.asignadaA, null);
++  const libre = await api.pedir("GET", "/api/disponibilidad?fecha=2026-12-02&pista=pista-1");
++  assert.equal(libre.cuerpo.pistas[0].franjas[0].estado, "libre");
++});
++
++test("esperas: caducan al inicio, desaparecen, liberan límite y no reviven al atrasar el reloj", async (t) => {
++  const api = await arrancarApi();
++  t.after(() => api.cerrar());
++  const ids = await preparar(api);
++  await apuntar(api);
++  await apuntar(api, "socio-002", inicios[1]);
++  await api.pedir("POST", "/_reloj", { cuerpo: { ahora: inicios[0] } });
++  const activas = (await api.pedir("GET", "/api/esperas", { socio: "socio-002" })).cuerpo.esperas;
++  assert.equal(activas.length, 1);
++  assert.equal(activas[0].inicio, inicios[1]);
++  comprobarError(await api.pedir("POST", "/api/reservas/" + ids[0] + "/cancelar", { cuerpo: { forzar: true } }), 409, "RESERVA_PASADA");
++  assert.equal((await apuntar(api, "socio-002", inicios[2])).status, 201);
++  await api.pedir("POST", "/_reloj", { cuerpo: { ahora: "2026-11-18T10:00" } });
++  const cancelar = await api.pedir("POST", "/api/reservas/" + ids[0] + "/cancelar");
++  assert.equal(cancelar.cuerpo.asignadaA, null);
++  assert.equal((await api.pedir("GET", "/_estado")).cuerpo.esperas[0].estado, "descartada");
++});
++
++test("esperas: cuota desactivada después del alta descarta y prueba al siguiente", () => {
++  const estado = crearSemilla();
++  const club = crearClub(estado);
++  const reserva = club.crearReserva({ socioId: "socio-041", pistaId: "pista-1", inicio: inicios[0] }).reserva;
++  const primera = club.crearEspera("socio-002", { pistaId: "pista-1", inicio: inicios[0] }).espera;
++  club.crearEspera("socio-004", { pistaId: "pista-1", inicio: inicios[0] });
++  estado.socios.find((s) => s.id === "socio-002")!.cuotaActiva = false;
++  const cancelar = club.cancelarReserva(reserva.id, {});
++  assert.equal(estado.esperas.find((e) => e.id === primera.id)!.estado, "descartada");
++  assert.equal(club.obtenerReserva(cancelar.asignadaA!).reserva.socioId, "socio-004");
++});
