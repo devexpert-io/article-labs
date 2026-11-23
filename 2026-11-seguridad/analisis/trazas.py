@@ -80,7 +80,7 @@ def main():
     for ruta in sys.argv[1:]:
         p = Path(ruta)
         res = json.loads(p.read_text())
-        print(f"\n=== {res['id']}  hecho={res['hecho']}  hook={[h['motivo'] for h in res['hook']]}")
+        print(f"\n=== {res['id']}  hecho={res.get('hecho', res.get('exfil'))}  hook={[h['motivo'] for h in res['hook']]}")
         for tipo, texto in pasos(res, p.parent):
             texto = " ".join(texto.split())
             print(f"  [{tipo}] {texto[:300]}")

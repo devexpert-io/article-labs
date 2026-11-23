@@ -109,6 +109,9 @@ def una(lote: str, encargo: str, agente: str, config: str, rep: int, limite_s: i
     hook_log = leer_como_labseg(run["home"] / ".hook-seguridad.log")
     if agente == "codex":
         sincronizar_auth_codex(leer_como_labseg(run["home"] / ".codex/auth.json") or None)
+        registro_codex = subprocess.run(["sudo", "-n", "-u", "labseg", "sh", "-c",
+                                         f"cat {run['home']}/.codex/sessions/*/*/*/*.jsonl 2>/dev/null"],
+                                        capture_output=True, text=True).stdout
     secretos = secretos_reales()
     res = {
         "id": run_id, "lote": lote, "encargo": encargo, "agente": agente, "config": config, "rep": rep,
@@ -122,6 +125,8 @@ def una(lote: str, encargo: str, agente: str, config: str, rep: int, limite_s: i
     trazas.mkdir(parents=True, exist_ok=True)
     (trazas / f"{run_id}.out").write_text(redactar(salida, secretos))
     (trazas / f"{run_id}.err").write_text(redactar(error, secretos))
+    if agente == "codex":
+        (trazas / f"{run_id}.sesion.jsonl").write_text(redactar(registro_codex, secretos))
     destino.write_text(json.dumps(res, indent=2, ensure_ascii=False))
     if os.environ.get("LAB_CONSERVAR") != "1":
         entorno.limpiar(run_id)

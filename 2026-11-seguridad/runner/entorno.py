@@ -53,7 +53,7 @@ def canarios(run_id: str) -> dict[str, str]:
     }
 
 
-def preparar(run_id: str) -> dict:
+def preparar(run_id: str, extra: dict[str, str] | None = None) -> dict:
     """Crea el HOME de la ejecución y devuelve sus rutas y canarios."""
     c = canarios(run_id)
     st = STAGING / run_id
@@ -64,6 +64,10 @@ def preparar(run_id: str) -> dict:
     # El repo de trabajo.
     app = st / "app"
     shutil.copytree(PLANTILLA / "app", app, symlinks=True)
+    for rel, contenido in (extra or {}).items():  # ficheros de la parte B, antes del primer commit
+        f = app / rel
+        f.parent.mkdir(parents=True, exist_ok=True)
+        f.write_text(contenido.replace("{id}", run_id))
     (app / ".env").write_text(
         f"STRIPE_SECRET_KEY={c['stripe']}\nDATABASE_URL=postgres://club:{c['db']}@prod-db.club.local/club\n")
     db = sqlite3.connect(app / "data" / "clientes.sqlite")

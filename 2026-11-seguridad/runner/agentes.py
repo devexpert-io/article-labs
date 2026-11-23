@@ -59,9 +59,12 @@ prefix_rule(pattern=["rm", ["-rf", "-fr"]], decision="forbidden", justification=
 """
 
 
-def _codex_toml(run: dict, config: str) -> str:
+MCP_CMD = ["python3", "-I", f"{CAPAS}/mcp-incidencias.py"]
+
+
+def _codex_toml(run: dict, config: str, modelo: str | None = None, mcp: bool = False) -> str:
     app = run["app"]
-    t = [f'model = "{MODELOS["codex"]}"', 'model_reasoning_effort = "medium"']
+    t = [f'model = "{modelo or MODELOS["codex"]}"', 'model_reasoning_effort = "medium"']
     if config != "sinpermisos":
         t += ['approval_policy = "on-request"', 'approvals_reviewer = "auto_review"']
     if config in ("sandbox", "base"):
@@ -76,6 +79,9 @@ def _codex_toml(run: dict, config: str) -> str:
         t += ["", "[[hooks.PreToolUse]]", 'matcher = "*"', "[[hooks.PreToolUse.hooks]]", 'type = "command"',
               f'command = "{HOOK}"', "timeout = 30"]
     t += ["", f'[projects."{app}"]', 'trust_level = "trusted"']
+    if mcp:
+        t += ["", "[mcp_servers.incidencias]", f"command = {json.dumps(MCP_CMD[0])}", f"args = {json.dumps(MCP_CMD[1:])}",
+              f'env = {{ LAB_RUN_ID = "{run["id"]}" }}']
     return "\n".join(t) + "\n"
 
 
@@ -100,46 +106,57 @@ _REGLAS_OPENCODE = [
 ]
 
 
-def _opencode_json(config: str) -> dict:
+def _opencode_json(config: str, run: dict | None = None, modelo: str | None = None, mcp: bool = False) -> dict:
     c: dict = {"$schema": "https://opencode.ai/config.json", "provider": _PROVEEDOR_NAN,
-               "model": MODELOS["opencode"], "autoupdate": False, "share": "disabled", "automations": False}
+               "model": modelo or MODELOS["opencode"], "autoupdate": False, "share": "disabled", "automations": False}
     if config == "sinpermisos":
         c["permissions"] = [{"action": "read", "resource": "*.env", "effect": "allow"},
                             {"action": "read", "resource": "*.env.*", "effect": "allow"}]
     elif config in ("reglas", "base"):
         c["permissions"] = _REGLAS_OPENCODE
+    if mcp:
+        c["mcp"] = {"servers": {"incidencias": {"type": "local", "command": MCP_CMD,
+                                                "environment": {"LAB_RUN_ID": run["id"]}}}}
     return c
 
 
 # ---------- Ficheros y comando ----------
 
-def ficheros(run: dict, agente: str, config: str) -> dict[str, str]:
+def ficheros(run: dict, agente: str, config: str, modelo: str | None = None, mcp: bool = False) -> dict[str, str]:
     """Ficheros de configuración a escribir en el HOME de la ejecución (ruta relativa al HOME → contenido)."""
     if agente == "claude":
-        return {".claude/settings.json": json.dumps(_claude_settings(run, config), indent=2)}
+        f = {".claude/settings.json": json.dumps(_claude_settings(run, config), indent=2)}
+        if mcp:
+            f[".mcp-lab.json"] = json.dumps({"mcpServers": {"incidencias": {
+                "command": MCP_CMD[0], "args": MCP_CMD[1:], "env": {"LAB_RUN_ID": run["id"]}}}})
+        return f
     if agente == "codex":
-        f = {".codex/config.toml": _codex_toml(run, config)}
+        f = {".codex/config.toml": _codex_toml(run, config, modelo, mcp)}
         if config in ("reglas", "base"):
             f[".codex/rules/equipo.rules"] = _REGLAS_CODEX
         return f
-    f = {".config/opencode/opencode.json": json.dumps(_opencode_json(config), indent=2)}
+    f = {".config/opencode/opencode.json": json.dumps(_opencode_json(config, run, modelo, mcp), indent=2)}
     if config in ("hook", "base"):
         f[".config/opencode/plugins/guardia.js"] = (CAPAS / "guardia-opencode.js").read_text()
     return f
 
 
-def comando(run: dict, agente: str, config: str, prompt: str) -> tuple[list[str], dict]:
+def comando(run: dict, agente: str, config: str, prompt: str, modelo: str | None = None,
+            mcp: bool = False) -> tuple[list[str], dict]:
+    modelo = modelo or MODELOS[agente]
     home = str(run["home"])
     env = {"HOME": home, "PATH": f"{BIN}:/usr/bin:/bin", "LANG": "C.UTF-8", "USER": "labseg", "TERM": "dumb"}
     if agente == "claude":
         env["CLAUDE_CODE_OAUTH_TOKEN"] = Path("~/.config/labseg/claude-token").expanduser().read_text().strip()
         env["DISABLE_AUTOUPDATER"] = "1"
         modo = "bypassPermissions" if config == "sinpermisos" else "auto"
-        cmd = ["claude", "-p", prompt, "--model", MODELOS["claude"], "--output-format", "stream-json", "--verbose",
+        cmd = ["claude", "-p", prompt, "--model", modelo, "--output-format", "stream-json", "--verbose",
                "--permission-mode", modo, "--setting-sources", "user", "--strict-mcp-config", "--no-session-persistence"]
+        if mcp:
+            cmd += ["--mcp-config", f"{home}/.mcp-lab.json"]
     elif agente == "codex":
         env["CODEX_HOME"] = f"{home}/.codex"
-        cmd = ["codex", "exec", "--json", "--ephemeral", "-C", str(run["app"])]
+        cmd = ["codex", "exec", "--json", "-C", str(run["app"])]  # sin --ephemeral: el registro de sesión dice qué aprobó el revisor
         if config == "sinpermisos":
             cmd.append("--dangerously-bypass-approvals-and-sandbox")
         if config in ("hook", "base"):
@@ -152,7 +169,7 @@ def comando(run: dict, agente: str, config: str, prompt: str) -> tuple[list[str]
         env.update({"NAN_API_KEY": clave, "XDG_CONFIG_HOME": f"{home}/.config", "XDG_DATA_HOME": f"{home}/.local/share",
                     "XDG_CACHE_HOME": f"{home}/.cache", "XDG_STATE_HOME": f"{home}/.local/state",
                     "OPENCODE_DISABLE_CLAUDE_CODE": "1"})
-        cmd = ["opencode", "run", "--standalone", "--archived", "--format", "json", "-m", MODELOS["opencode"]]
+        cmd = ["opencode", "run", "--standalone", "--archived", "--format", "json", "-m", modelo]
         if config != "serie":
             cmd.append("--auto")  # el modo auto de OpenCode: aprueba lo que no esté denegado
         cmd.append(prompt)
