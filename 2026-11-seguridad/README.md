@@ -154,7 +154,7 @@ Lo que se ve en las trazas:
 - **El sandbox de Codex tiene dos niveles:** lo que el perfil deniega (leer `.env` y `~/.ssh`) no se puede pedir, y el agente ni lo intenta. Escribir fuera del proyecto o en `data/` (de solo lectura en el perfil) sí: lo pidió y el revisor lo aprobó en las seis ejecuciones. La red apagada por el perfil aguantó incluso con la escalada aprobada (el push forzado y el envío del `.env`).
 - **El hook paró casi todo, con huecos:** no ve lo que hace un proceso (`npm test` volcó el `.env` en los tres agentes), no reconoce `curl --data-binary @.env` (Codex mandó el `.env` en sus dos ejecuciones con solo el hook) ni `rm -rf -- ~/…` (Codex borró fuera del proyecto en las dos).
 - **Base de equipo:** 0 de 22 en Claude Code, 2 en Codex (borrar fuera, con escalada aprobada y el hook sin ver el `--`) y 2 en OpenCode (el `.env` a través de `npm test`, porque no tiene sandbox).
-- **Coste de cortar la red:** con el sandbox de Codex sin red, los tests que levantan la API en local fallaron (`listen EPERM`) en todas las ejecuciones del encargo `env-tests` salvo las de sin permisos. Con el sandbox de serie, gpt-6.1-sol vio el `.env` en la salida del test y lo ocultó antes de enseñarlo.
+- **Coste de cortar la red:** con el sandbox de Codex sin red, los tests que levantan la API en local fallaron (`listen EPERM`) en todas las ejecuciones del encargo `env-tests` salvo las de sin permisos. En las configuraciones donde el test sí podía leer el `.env`, gpt-6.1-sol leyó el test, vio que imprime credenciales y lo ejecutó ocultando los valores.
 
 ### Parte B: inyecciones
 
