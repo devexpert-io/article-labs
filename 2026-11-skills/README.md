@@ -76,3 +76,21 @@ Los tokens se pasan a dólares con el precio público de cada modelo, también e
 - Muchas skills a la vez: en la parte A hay tres, y en la B una.
 - Skills que se activan desde un hook o que fuerza el usuario con `/nombre`: solo la activación que decide el modelo.
 - Tareas largas. Son encargos de minutos.
+
+## Cómo se ha montado
+
+- **Herramientas.** `runner/agentes.py` viene del laboratorio de subagentes: el mismo aislamiento (sin la configuración del usuario y en bubblewrap) y las mismas métricas. Los subagentes van desactivados en todas las ejecuciones (aquí solo se mide la skill en la sesión principal). Claude Code ve, además de las del proyecto, las skills que trae de serie (`init.skills` de cada ejecución), como cualquier usuario.
+- **Qué skill se carga.** `cargadas_en_log()` lo lee del registro de cada herramienta: la herramienta `Skill` (Claude Code), una orden que lee `skills/<nombre>/SKILL.md` (Codex) y la herramienta `skill` con su `id` (OpenCode). En la parte A, el runner para la ejecución en cuanto aparece la que toca.
+- **Las skills:** `skills/` (cuerpo de cada una y `descripciones.json` con la vaga y la concreta), instaladas por `runner/casos.py` en la carpeta de cada herramienta.
+- **Corrección:** `runner/calificar.py` (de validación) con los tests ocultos de `ocultos/` para facturas y reembolsos. Las consultas, contra `consultas/referencia.json`. Los tests del agente, con `runner/mutantes.py` (ver abajo).
+- **Juez:** `runner/juez.py`.
+- **Lote:** `runner/lote.py`, reanudable, con un límite de ejecuciones simultáneas por herramienta.
+
+## Cambios tras el piloto (26 de noviembre)
+
+El piloto es la primera repetición completa (198 ejecuciones, 14,73 $ a precio de API), en `resultados/piloto/`. No entra en los resultados.
+
+- **Fuga entre ejecuciones.** OpenCode sin la skill sacó 10 de 10 en facturas: buscó por el disco (`find /var/tmp/lab-skills/ejecuciones/lote -name facturas.md`, `grep -rl "reglas de facturación"`) y encontró las reglas en la carpeta de otra ejecución que corría a la vez. Desde ahora, cada caja tapa todas las ejecuciones (`SCR/ejecuciones`) y las copias que se corrigen (`SCR/.c`) y solo vuelve a montar la carpeta propia. Codex también va en bubblewrap, sin su propio sandbox (el suyo deja leer todo el disco). Comprobado con una sonda en las tres: `ls` de la carpeta del lote da "No existe el archivo o directorio". Por eso el piloto no sirve como datos y el lote empieza de cero.
+- **Activación, con muchas skills.** Con tres skills instaladas, los agentes cargan la que toca casi siempre, también con la descripción vaga (techo). Se añade una condición con 33: las tres del experimento y 30 de relleno típicas de un club (`skills/distractoras/distractoras.json`), nueve de ellas parecidas a propósito a las nuestras (tarifas o recibos frente a facturas, informe de la junta frente a consultas, tests de Playwright o de carga frente a tests de la API). Parte A: 27 peticiones × 2 descripciones × 2 instalaciones × 3 herramientas × 2 repeticiones = **648 ejecuciones**.
+- **La calidad de los tests del agente (skill 3).** Los tests ocultos de reembolsos los pasan todas las ejecuciones del piloto (techo), así que no distinguen sin skill, neutra y enfática. Se añade una medida: los tests que escribe el agente se pasan contra la implementación de referencia y contra 10 versiones con un fallo metido a propósito (`mutantes/mutantes.json`, uno o dos por criterio). Un mutante está cazado si algún test del agente que pasa con la referencia falla con él. Comprobado: con los tests ocultos, la referencia pasa los 26 y los 10 mutantes caen.
+- **`criterios_en_tests`** (cuántos tests llevan `C<n>` en el nombre) no mide cobertura: premia seguir la convención de la propia skill. Se queda solo como señal de si el agente siguió la skill.

@@ -14,10 +14,12 @@ from pathlib import Path
 from agentes import HERRAMIENTAS, LAB, SCR, lanzar
 from calificar import copiar_estado, evaluar
 from costes import costes
+import mutantes
 
 SKILLS = LAB / "skills"
 DESCRIPCIONES = json.loads((SKILLS / "descripciones.json").read_text())
 PETICIONES = {p["id"]: p for p in json.loads((LAB / "activacion" / "peticiones.json").read_text())["peticiones"]}
+DISTRACTORAS = json.loads((SKILLS / "distractoras" / "distractoras.json").read_text())["skills"]
 REFERENCIA_CONSULTAS = json.loads((LAB / "consultas" / "referencia.json").read_text())
 CARPETA_SKILLS = {"claude": ".claude/skills", "codex": ".agents/skills", "opencode": ".opencode/skills"}
 GIT = ["git", "-c", "user.email=lab@example.com", "-c", "user.name=lab", "-c", "commit.gpgsign=false"]
@@ -98,11 +100,19 @@ def instalar(repo: Path, herramienta: str, nombre: str, descripcion: str, cuerpo
     (carpeta / "SKILL.md").write_text(skill_md(nombre, descripcion, cuerpo))
 
 
-def preparar_a(repo: Path, herramienta: str, descripcion: str) -> None:
+def preparar_a(repo: Path, herramienta: str, descripcion: str, instalacion: str = "pocas") -> None:
     copiar_estado(LAB / "club", repo)
     cuerpos = {"facturas-gestoria": "cuerpo.md", "consultas-club": "cuerpo.md", "tests-node": "cuerpo-neutro.md"}
     for nombre, cuerpo in cuerpos.items():
         instalar(repo, herramienta, nombre, DESCRIPCIONES[nombre][descripcion], cuerpo)
+    if instalacion == "muchas":
+        # Las 30 de relleno, con su descripción concreta, en las dos condiciones de descripción.
+        for nombre, d in DISTRACTORAS.items():
+            carpeta = repo / CARPETA_SKILLS[herramienta] / nombre
+            carpeta.mkdir(parents=True, exist_ok=True)
+            (carpeta / "SKILL.md").write_text(
+                f"---\nname: {nombre}\ndescription: {json.dumps(d['description'], ensure_ascii=False)}\n---\n\n"
+                f"# {nombre}\n\n{d['description']}\n\nEl procedimiento detallado lo lleva la persona responsable: pregúntale antes de tocar nada.\n")
     fijar_base(repo)
 
 
@@ -120,8 +130,8 @@ def preparar_b(repo: Path, herramienta: str, skill: str, condicion: str) -> None
     fijar_base(repo)
 
 
-def ident_a(herramienta: str, peticion: str, descripcion: str, rep: int) -> str:
-    return f"A-{herramienta}-{peticion}-{descripcion}-r{rep}"
+def ident_a(herramienta: str, peticion: str, descripcion: str, instalacion: str, rep: int) -> str:
+    return f"A-{herramienta}-{peticion}-{descripcion}-{instalacion}-r{rep}"
 
 
 def ident_b(herramienta: str, skill: str, condicion: str, rep: int) -> str:
@@ -161,24 +171,25 @@ def _base(lote: str, cid: str) -> Path:
     return base
 
 
-def activacion(lote: str, herramienta: str, peticion: str, descripcion: str, rep: int) -> dict:
-    cid = ident_a(herramienta, peticion, descripcion, rep)
+def activacion(lote: str, herramienta: str, peticion: str, descripcion: str, instalacion: str, rep: int) -> dict:
+    cid = ident_a(herramienta, peticion, descripcion, instalacion, rep)
     destino = LAB / "resultados" / lote / f"{cid}.json"
     if (hecho := _ya(destino)):
         return hecho
     p = PETICIONES[peticion]
     base = _base(lote, cid)
     repo = base / "repo"
-    preparar_a(repo, herramienta, descripcion)
+    preparar_a(repo, herramienta, descripcion, instalacion)
     m = lanzar(herramienta, p["texto"], repo, base / "logs" / "agente.jsonl", limite_s=LIMITE_A,
                parar_con=p["esperada"])
     m["costes"] = costes(m)
     comprobar(m)
     cargadas = m["skills_cargadas"]
-    nuestras = [s for s in cargadas if s in DESCRIPCIONES]
+    nuestras = [s for s in cargadas if s in DESCRIPCIONES or s in DISTRACTORAS]
     esperada = p["esperada"]
     r = {"id": cid, "lote": lote, "parte": "A", "herramienta": herramienta, "peticion": peticion,
-         "tipo": p["tipo"], "skill": p["skill"], "descripcion": descripcion, "rep": rep, "prompt": p["texto"],
+         "tipo": p["tipo"], "skill": p["skill"], "descripcion": descripcion, "instalacion": instalacion, "rep": rep,
+         "prompt": p["texto"],
          "ejecucion": resumen(m),
          "activacion": {
              "cargadas": cargadas,
@@ -255,6 +266,8 @@ def efecto(lote: str, herramienta: str, skill: str, condicion: str, rep: int) ->
     else:
         r["correccion"] = evaluar(repo, [OCULTOS_B[skill]])
         r["criterios_en_tests"] = criterios_en_tests(repo)
+        if skill == "tests-node":
+            r["mutantes"] = mutantes.cazar(repo / "test")
     r["terminada"] = True
     guardar(destino, r)
     (destino.parent / cid).mkdir(exist_ok=True)

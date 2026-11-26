@@ -51,15 +51,16 @@ def trabajos(args) -> list[tuple]:
         if "A" in partes:
             for pid in peticiones:
                 for d in ("vaga", "concreta"):
-                    for h in herramientas:
-                        lista.append(("A", h, pid, d, rep))
+                    for inst in args.instalaciones.split(","):
+                        for h in herramientas:
+                            lista.append(("A", h, pid, d, inst, rep))
         if "B" in partes:
             for sk in skills:
                 for cond in casos.PARTE_B[sk]["condiciones"]:
                     for h in herramientas:
                         lista.append(("B", h, sk, cond, rep))
     # Primero las repeticiones bajas: si el lote se corta, quedan repeticiones completas de todo.
-    return sorted(lista, key=lambda t: (t[4], t[0]))
+    return sorted(lista, key=lambda t: (t[-1], t[0]))
 
 
 def ejecutar(lote: str, t: tuple) -> dict:
@@ -80,7 +81,9 @@ def describir(r: dict) -> str:
     if r["skill"] == "consultas-club":
         return base + f" consultas={c['aciertos']}/4"
     enc = next(iter(c["encargos"].values()))
-    return base + f" gate={c['gate_ok']} criterios={enc['criterios_ok']}/{enc['criterios_total']} tests_C={r.get('criterios_en_tests')}"
+    mut = r.get("mutantes")
+    return base + (f" gate={c['gate_ok']} criterios={enc['criterios_ok']}/{enc['criterios_total']}"
+                   + (f" mutantes={mut['cazados']}/{mut['total']} (validos {mut['validos']}/{mut['tests']})" if mut else ""))
 
 
 def main() -> None:
@@ -89,6 +92,7 @@ def main() -> None:
     a.add_argument("--partes", default="A,B")
     a.add_argument("--peticiones", default="", help="ids de activacion/peticiones.json (por defecto, todas)")
     a.add_argument("--skills", default="", help="skills de la parte B (por defecto, las tres)")
+    a.add_argument("--instalaciones", default="pocas,muchas", help="parte A: 3 skills (pocas) o 33 (muchas)")
     a.add_argument("--herramientas", default="claude,codex,opencode")
     a.add_argument("--reps", type=int, default=2)
     a.add_argument("--hilos", type=int, default=6)

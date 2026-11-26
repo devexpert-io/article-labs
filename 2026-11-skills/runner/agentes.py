@@ -51,7 +51,11 @@ SIEMPRE_FUERA_CLAUDE = ["Workflow"]
 # Lo que el usuario tiene en ~/.claude y no debe ver el agente: se tapa con carpetas vacías dentro de la caja.
 VACIAR_CLAUDE = [HOME / ".claude" / d for d in ("skills", "agents", "commands", "plugins")]
 
-OCULTAR = [HOME / "Projects", HOME / "DevExpert", HOME / ".codex", HOME / ".config", HOME / ".local/share"]
+# Además de los datos del usuario, las demás ejecuciones del laboratorio (SCR/ejecuciones) y las copias que se
+# corrigen con los tests ocultos (SCR/.c): en el piloto, OpenCode sin la skill encontró las reglas de facturación en
+# la carpeta de otra ejecución que corría a la vez. Cada agente solo ve su propia carpeta (se vuelve a montar encima).
+OCULTAR = [HOME / "Projects", HOME / "DevExpert", HOME / ".codex", HOME / ".config", HOME / ".local/share",
+           SCR / "ejecuciones", SCR / ".c"]
 
 
 PROVEEDOR_NAN = {
@@ -152,7 +156,10 @@ def comando(herramienta: str, prompt: str, cwd: Path, subagentes: bool, aux: Pat
             confiar_en_codex(cwd)
         if not subagentes:
             activar += ["-c", f'model_catalog_json="{catalogo_sin_subagentes(aux)}"']
-        cmd = ["codex", "exec", "--json", "--skip-git-repo-check", "-m", modelo,
+        # Codex también va dentro de bubblewrap, para que no vea las demás ejecuciones (su propio sandbox deja leer
+        # todo el disco). Dentro de la caja, sin su sandbox: la caja ya solo deja escribir en su carpeta.
+        cmd = [*caja(cwd, [CODEX_HOME, HOME_CODEX, aux], OCULTAR),
+               "codex", "exec", "--json", "--skip-git-repo-check", "-m", modelo, "-s", "danger-full-access",
                "-c", f'model_reasoning_effort="{ESFUERZO_CODEX}"', *activar, "-C", str(cwd), prompt]
         env.update({"HOME": str(HOME_CODEX), "CODEX_HOME": str(CODEX_HOME)})
         return cmd, env
