@@ -76,6 +76,12 @@ def comprobar(m: dict) -> dict:
     # runner lo cortó. Su respuesta nombra códigos HTTP (401, 403) que la expresión de AJENO confundía con errores.
     if m.get("rc") in ("timeout", "estancado") and not m.get("error_agente"):
         return m
+    # OpenCode, cuando el agente le hace una pregunta al usuario, la cancela en una ejecución sin nadie delante
+    # ("Cancelled a request for input this run cannot answer"). Es lo que hizo el agente (pararse a preguntar), no
+    # un fallo ajeno: cuenta como resultado y se marca.
+    if "request for input" in str(m.get("error_agente") or ""):
+        m["pregunto_al_usuario"] = True
+        return m
     if (m.get("error_agente") or m.get("rc") not in (0, None, "parada")) and AJENO.search(texto):
         if m["herramienta"] == "claude" or m.get("rc") not in (0, "parada") or sin_trabajo:
             raise FalloAjeno(f"{m['herramienta']}: {texto[:400]}")
@@ -146,7 +152,8 @@ def ident_b(herramienta: str, skill: str, condicion: str, rep: int) -> str:
 def resumen(m: dict) -> dict:
     claves = ("herramienta", "version", "modelo", "modelo_real", "duracion_s", "duracion_s_agente", "rc", "sesion",
               "principal", "por_modelo", "total", "costes", "coste_herramienta_usd", "modelUsage", "skills_cargadas",
-              "herramientas", "ordenes", "respuesta_final", "error_agente", "stderr", "cuota", "aviso", "turnos")
+              "herramientas", "ordenes", "respuesta_final", "error_agente", "stderr", "cuota", "aviso", "turnos",
+              "pregunto_al_usuario")
     r = {k: m.get(k) for k in claves if k in m}
     if m.get("init"):
         r["init"] = {k: m["init"].get(k) for k in ("skills", "claude_code_version")}
