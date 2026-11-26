@@ -1,0 +1,414 @@
+diff --git a/README.md b/README.md
+index 256e5c2..e241d75 100644
+--- a/README.md
++++ b/README.md
+@@ -26,6 +26,22 @@ En el club siempre es miércoles 18 de noviembre de 2026 a las 10:00, salvo que
+ - No se reservan pistas cerradas ni franjas que ya han empezado.
+ - Cancelar es gratis hasta 24 horas antes. Después, solo con `forzar: true`, y se cobra una penalización del 100 % del importe.
+ 
++## Facturación
++
++Cada mes cerrado se genera una factura por socio con lo que ha pagado por las reservas que **empiezan** ese mes. Las reglas son las de la gestoría del club:
++
++| Estado de la reserva | Se factura | Importe de la línea | Concepto |
++|---|---|---|---|
++| `confirmada` | sí | `importe` | `Reserva` |
++| `no_presentada` | sí | `importe` | `Reserva` |
++| `cancelada` con `penalizacion` mayor que 0 | sí | `penalizacion` | `Penalización` |
++| `cancelada` sin penalización | no | | |
++
++- Un socio sin nada que facturar ese mes no lleva factura. Las líneas van por orden de inicio de la reserva.
++- **IVA:** los importes ya llevan el 21 % incluido. `total` es la suma de las líneas; la `base` se calcula sobre el total de la factura (no línea a línea), redondeada al céntimo con medio céntimo hacia arriba: `Math.round(total * 100 / 121)`; `iva` es `total - base`. Por ejemplo, 1.800 + 1.800 + 2.800 = 6.400 céntimos dan base 5.289 e IVA 1.111.
++- **Numeración:** `F<año>-<4 cifras>` (`F2026-0001`), con el año **del mes facturado**: diciembre de 2026 generado en enero de 2027 sigue la serie de 2026. Una serie por año, correlativa, sin huecos ni repetidos, que empieza en `0001`. Dentro de un mes, los números se asignan por orden de id de socio, y cada mes generado sigue donde lo dejó el último generado de su año, aunque se generen fuera de orden. Un mes sin facturas no gasta números, y generar otra vez un mes ya generado devuelve las mismas facturas.
++- Solo se factura un mes que ya ha terminado según la hora del club.
++
+ ## API
+ 
+ ### Pistas
+@@ -50,6 +66,16 @@ En el club siempre es miércoles 18 de noviembre de 2026 a las 10:00, salvo que
+ 
+ Una reserva tiene `id`, `socioId`, `pistaId`, `inicio`, `fin`, `estado`, `importe`, `notas` y, si se canceló, `penalizacion` y `motivoCancelacion`.
+ 
++### Facturas
++
++Solo para gestores: sin `X-Socio`, `401 NO_IDENTIFICADO`; con un socio que no es gestor, `403 SIN_PERMISO`.
++
++- `POST /api/facturas` con `{ mes: "AAAA-MM" }`: genera las facturas de ese mes. Responde `201 { facturas }` la primera vez y `200 { facturas }` las siguientes, con las mismas facturas. Errores: `DATOS_INVALIDOS` (400, `mes` sin formato `AAAA-MM`) y `MES_ABIERTO` (409, el mes no ha terminado).
++- `GET /api/facturas?mes=AAAA-MM`: las facturas de un mes, ordenadas por id de socio. Responde `{ facturas }`, vacía si el mes no se ha generado. Error: `DATOS_INVALIDOS`.
++- `GET /api/facturas/:numero`: una factura. Responde `{ factura }`. Error: `FACTURA_NO_ENCONTRADA` (404).
++
++Una factura tiene `numero`, `mes`, `socioId`, `lineas` (cada una con `reservaId`, `concepto` e `importe`), `total`, `base` e `iva`, todos los importes en céntimos.
++
+ ### Solo para pruebas
+ 
+ - `GET /_estado`: el estado completo del club.
+diff --git a/src/nucleo.ts b/src/nucleo.ts
+index 62ed37b..193952f 100644
+--- a/src/nucleo.ts
++++ b/src/nucleo.ts
+@@ -1,6 +1,6 @@
+ // Las operaciones del club y sus reglas. La API HTTP (src/servidor.ts) es la única que las llama.
+ import { finDeFranja, HORAS, precio } from "./semilla.ts";
+-import type { Estado, EstadoReserva, Reserva } from "./tipos.ts";
++import type { Estado, EstadoReserva, Factura, LineaFactura, Reserva, Socio } from "./tipos.ts";
+ 
+ export class ErrorDelClub extends Error {
+   codigo: string;
+@@ -14,6 +14,7 @@ export class ErrorDelClub extends Error {
+ 
+ const FECHA = /^\d{4}-\d{2}-\d{2}$/;
+ const FECHA_HORA = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}$/;
++const MES = /^\d{4}-(0[1-9]|1[0-2])$/;
+ export const LIMITE_MAXIMO = 100;
+ export const LIMITE_POR_DEFECTO = 50;
+ export const MAXIMO_RESERVAS_FUTURAS = 3;
+@@ -31,6 +32,29 @@ function horasEntre(desde: string, hasta: string): number {
+   return (Date.parse(`${hasta}:00Z`) - Date.parse(`${desde}:00Z`)) / 3_600_000;
+ }
+ 
++/** Solo un gestor genera y consulta facturas. */
++function exigirGestor(quien: Socio | undefined): void {
++  if (!quien) throw new ErrorDelClub("NO_IDENTIFICADO", "Hace falta la cabecera X-Socio de un gestor", 401);
++  if (quien.rol !== "gestor") throw new ErrorDelClub("SIN_PERMISO", "Solo un gestor puede generar y consultar facturas", 403);
++}
++
++function validarMes(mes: unknown): string {
++  if (typeof mes !== "string" || !MES.test(mes)) invalido("mes es obligatorio, con el formato AAAA-MM");
++  return mes as string;
++}
++
++/** La línea que una reserva aporta a la factura, según las reglas de la gestoría, o undefined si no se factura. */
++function lineaDe(r: Reserva): LineaFactura | undefined {
++  if (r.estado === "confirmada" || r.estado === "no_presentada") return { reservaId: r.id, concepto: "Reserva", importe: r.importe };
++  if (r.estado === "cancelada" && (r.penalizacion ?? 0) > 0) return { reservaId: r.id, concepto: "Penalización", importe: r.penalizacion! };
++  return undefined;
++}
++
++/** Base sobre el total de la factura (IVA del 21 % incluido), redondeada al céntimo con medio hacia arriba. */
++export function baseImponible(total: number): number {
++  return Math.round((total * 100) / 121);
++}
++
+ export interface FiltrosReservas {
+   fecha?: string;
+   desde?: string;
+@@ -180,6 +204,49 @@ export function crearClub(estado: Estado) {
+       if (typeof datos.motivo === "string") r.motivoCancelacion = datos.motivo;
+       return { reserva: r };
+     },
++
++    generarFacturas(quien: Socio | undefined, mesPedido: unknown) {
++      exigirGestor(quien);
++      const mes = validarMes(mesPedido);
++      if (estado.ahora.slice(0, 7) <= mes) throw new ErrorDelClub("MES_ABIERTO", `El mes ${mes} todavía no ha terminado`);
++      if (estado.mesesFacturados.includes(mes)) {
++        return { creadas: false, facturas: estado.facturas.filter((f) => f.mes === mes) };
++      }
++      const anio = mes.slice(0, 4);
++      let siguiente = estado.facturas.filter((f) => f.numero.startsWith(`F${anio}-`)).length + 1;
++      const porSocio = new Map<string, LineaFactura[]>();
++      const delMes = estado.reservas
++        .filter((r) => r.inicio.slice(0, 7) === mes)
++        .sort((a, b) => a.inicio.localeCompare(b.inicio) || a.id.localeCompare(b.id));
++      for (const r of delMes) {
++        const linea = lineaDe(r);
++        if (!linea) continue;
++        porSocio.set(r.socioId, [...(porSocio.get(r.socioId) ?? []), linea]);
++      }
++      const nuevas: Factura[] = [...porSocio.keys()].sort().map((socioId) => {
++        const lineas = porSocio.get(socioId)!;
++        const total = lineas.reduce((suma, l) => suma + l.importe, 0);
++        const base = baseImponible(total);
++        const numero = `F${anio}-${String(siguiente++).padStart(4, "0")}`;
++        return { numero, mes, socioId, lineas, total, base, iva: total - base };
++      });
++      estado.facturas.push(...nuevas);
++      estado.mesesFacturados.push(mes);
++      return { creadas: true, facturas: nuevas };
++    },
++
++    listarFacturas(quien: Socio | undefined, mesPedido: unknown) {
++      exigirGestor(quien);
++      const mes = validarMes(mesPedido);
++      return { facturas: estado.facturas.filter((f) => f.mes === mes) };
++    },
++
++    obtenerFactura(quien: Socio | undefined, numero: string) {
++      exigirGestor(quien);
++      const factura = estado.facturas.find((f) => f.numero === numero);
++      if (!factura) throw new ErrorDelClub("FACTURA_NO_ENCONTRADA", `No existe la factura ${numero}`, 404);
++      return { factura };
++    },
+   };
+ }
+ 
+diff --git a/src/semilla.ts b/src/semilla.ts
+index bc45cc7..170a7f9 100644
+--- a/src/semilla.ts
++++ b/src/semilla.ts
+@@ -158,5 +158,5 @@ export function crearSemilla(): Estado {
+   socios.push({ id: "socio-041", nombre: "Nora Benítez", email: "nora.benitez@example.com", cuotaActiva: true, rol: "socio" });
+ 
+   reservas.sort((a, b) => (a.inicio === b.inicio ? a.pistaId.localeCompare(b.pistaId) : a.inicio.localeCompare(b.inicio)));
+-  return { ahora: AHORA, pistas: PISTAS.map((p) => ({ ...p })), socios, reservas, registro: [], contador };
++  return { ahora: AHORA, pistas: PISTAS.map((p) => ({ ...p })), socios, reservas, registro: [], contador, facturas: [], mesesFacturados: [] };
+ }
+diff --git a/src/servidor.ts b/src/servidor.ts
+index a6a7764..ab7fb03 100644
+--- a/src/servidor.ts
++++ b/src/servidor.ts
+@@ -42,10 +42,11 @@ function identificar(req: IncomingMessage): Socio | undefined {
+   return socio;
+ }
+ 
+-type Operacion = { nombre: string; argumentos: unknown; ejecutar: () => unknown };
++/** `http` es el código de la respuesta si no es el de por defecto; la operación puede fijarlo al ejecutarse. */
++type Operacion = { nombre: string; argumentos: unknown; ejecutar: () => unknown; http?: number };
+ 
+-// `quien` es el socio que hace la petición (cabecera X-Socio). Las operaciones actuales no lo usan.
+-async function resolver(req: IncomingMessage, url: URL, _quien: Socio | undefined): Promise<Operacion> {
++// `quien` es el socio que hace la petición (cabecera X-Socio). Solo lo usan las facturas.
++async function resolver(req: IncomingMessage, url: URL, quien: Socio | undefined): Promise<Operacion> {
+   const metodo = req.method ?? "GET";
+   const partes = url.pathname.split("/").filter(Boolean);
+   const q = url.searchParams;
+@@ -91,6 +92,26 @@ async function resolver(req: IncomingMessage, url: URL, _quien: Socio | undefine
+     const cuerpo = await leerCuerpo(req);
+     return { nombre: "cancelarReserva", argumentos: { reservaId: id, ...cuerpo }, ejecutar: () => club.cancelarReserva(id, cuerpo) };
+   }
++  if (recurso === "facturas" && !id && metodo === "POST") {
++    const cuerpo = await leerCuerpo(req);
++    const operacion: Operacion = {
++      nombre: "generarFacturas",
++      argumentos: cuerpo,
++      ejecutar: () => {
++        const { creadas, facturas } = club.generarFacturas(quien, cuerpo.mes);
++        operacion.http = creadas ? 201 : 200;
++        return { facturas };
++      },
++    };
++    return operacion;
++  }
++  if (recurso === "facturas" && !id && metodo === "GET") {
++    const mes = q.get("mes") ?? undefined;
++    return { nombre: "listarFacturas", argumentos: { mes }, ejecutar: () => club.listarFacturas(quien, mes) };
++  }
++  if (recurso === "facturas" && id && !accion && metodo === "GET") {
++    return { nombre: "obtenerFactura", argumentos: { numero: id }, ejecutar: () => club.obtenerFactura(quien, id) };
++  }
+   throw new ErrorDelClub("RUTA_NO_ENCONTRADA", `No existe ${metodo} ${url.pathname}`, 404);
+ }
+ 
+@@ -131,7 +152,7 @@ const servidor = createServer(async (req, res) => {
+     operacion = await resolver(req, url, quien);
+     const resultado = operacion.ejecutar();
+     anotar(true);
+-    responder(operacion.nombre === "crearReserva" ? 201 : 200, resultado);
++    responder(operacion.http ?? (operacion.nombre === "crearReserva" ? 201 : 200), resultado);
+   } catch (error) {
+     if (error instanceof ErrorDelClub) {
+       anotar(false, error.codigo);
+diff --git a/src/tipos.ts b/src/tipos.ts
+index 41e5915..6c843c3 100644
+--- a/src/tipos.ts
++++ b/src/tipos.ts
+@@ -42,6 +42,26 @@ export interface EntradaRegistro {
+   codigo?: string;
+ }
+ 
++export interface LineaFactura {
++  reservaId: string;
++  concepto: "Reserva" | "Penalización";
++  /** Céntimos de euro, IVA incluido. */
++  importe: number;
++}
++
++export interface Factura {
++  /** F<año>-<4 cifras>, con el año del mes facturado. */
++  numero: string;
++  /** AAAA-MM */
++  mes: string;
++  socioId: string;
++  lineas: LineaFactura[];
++  /** Céntimos: total = base + iva. */
++  total: number;
++  base: number;
++  iva: number;
++}
++
+ export interface Estado {
+   ahora: string;
+   pistas: Pista[];
+@@ -49,4 +69,7 @@ export interface Estado {
+   reservas: Reserva[];
+   registro: EntradaRegistro[];
+   contador: number;
++  facturas: Factura[];
++  /** Meses (AAAA-MM) ya generados, tengan o no facturas. */
++  mesesFacturados: string[];
+ }
+diff --git a/test/facturas.test.ts b/test/facturas.test.ts
+new file mode 100644
+index 0000000..3022b8f
+--- /dev/null
++++ b/test/facturas.test.ts
+@@ -0,0 +1,159 @@
++// Facturas mensuales (docs/specs/facturas.md), con las reglas de facturación de la gestoría.
++import assert from "node:assert/strict";
++import { test } from "node:test";
++import { arrancarApi, type Api } from "./ayuda.ts";
++
++const GESTOR = "socio-040";
++
++async function conApi(prueba: (api: Api) => Promise<void>, entorno: Record<string, string> = {}) {
++  const api = await arrancarApi(entorno);
++  try {
++    await prueba(api);
++  } finally {
++    api.cerrar();
++  }
++}
++
++const generar = (api: Api, mes: unknown, socio = GESTOR) => api.pedir("POST", "/api/facturas", { cuerpo: { mes }, socio });
++const reloj = async (api: Api, ahora: string) => assert.equal((await api.pedir("POST", "/_reloj", { cuerpo: { ahora } })).status, 200);
++const reservar = async (api: Api, socioId: string, pistaId: string, inicio: string) => {
++  const r = await api.pedir("POST", "/api/reservas", { cuerpo: { socioId, pistaId, inicio } });
++  assert.equal(r.status, 201, r.texto);
++  return r.cuerpo.reserva;
++};
++
++test("solo un gestor genera y consulta facturas", () => conApi(async (api) => {
++  await reloj(api, "2026-12-01T10:00");
++  for (const [metodo, ruta, cuerpo] of [
++    ["POST", "/api/facturas", { mes: "2026-10" }],
++    ["GET", "/api/facturas?mes=2026-10", undefined],
++    ["GET", "/api/facturas/F2026-0001", undefined],
++  ] as const) {
++    const anonimo = await api.pedir(metodo, ruta, { cuerpo });
++    assert.equal(anonimo.status, 401);
++    assert.equal(anonimo.cuerpo.error.codigo, "NO_IDENTIFICADO");
++    const socio = await api.pedir(metodo, ruta, { cuerpo, socio: "socio-001" });
++    assert.equal(socio.status, 403);
++    assert.equal(socio.cuerpo.error.codigo, "SIN_PERMISO");
++  }
++  assert.equal((await api.pedir("GET", "/api/facturas?mes=2026-10", { socio: GESTOR })).cuerpo.facturas.length, 0, "no se ha generado nada");
++}));
++
++test("mes con formato AAAA-MM y ya terminado", () => conApi(async (api) => {
++  for (const mes of [undefined, "2026-10-01", "2026-13", "2026-1", 202610]) {
++    const r = await generar(api, mes);
++    assert.equal(r.status, 400, `mes ${mes}`);
++    assert.equal(r.cuerpo.error.codigo, "DATOS_INVALIDOS");
++  }
++  assert.equal((await api.pedir("GET", "/api/facturas?mes=octubre", { socio: GESTOR })).cuerpo.error.codigo, "DATOS_INVALIDOS");
++  for (const mes of ["2026-11", "2026-12", "2027-01"]) {
++    const r = await generar(api, mes);
++    assert.equal(r.status, 409);
++    assert.equal(r.cuerpo.error.codigo, "MES_ABIERTO");
++  }
++  await reloj(api, "2026-11-30T23:59");
++  assert.equal((await generar(api, "2026-11")).cuerpo.error.codigo, "MES_ABIERTO");
++  await reloj(api, "2026-12-01T00:00");
++  assert.equal((await generar(api, "2026-11")).status, 201);
++}));
++
++test("octubre: una factura por socio con sus líneas, total, IVA y números; repetir y consultar", () => conApi(async (api) => {
++  const estado = (await api.pedir("GET", "/_estado")).cuerpo;
++  const octubre = estado.reservas
++    .filter((r: any) => r.inicio.startsWith("2026-10"))
++    .sort((a: any, b: any) => a.inicio.localeCompare(b.inicio) || a.id.localeCompare(b.id));
++  assert.ok(octubre.some((r: any) => r.estado === "cancelada"), "octubre tiene cancelaciones");
++  assert.ok(octubre.some((r: any) => r.estado === "no_presentada"), "octubre tiene no presentados");
++  const facturables = octubre.filter((r: any) => r.estado !== "cancelada" || r.penalizacion > 0);
++  const socios = [...new Set(facturables.map((r: any) => r.socioId))].sort() as string[];
++
++  const r = await generar(api, "2026-10");
++  assert.equal(r.status, 201);
++  const facturas = r.cuerpo.facturas;
++  assert.deepEqual(facturas.map((f: any) => f.socioId), socios, "una por socio con algo que facturar, por orden de id");
++  facturas.forEach((f: any, i: number) => {
++    assert.equal(f.numero, `F2026-${String(i + 1).padStart(4, "0")}`);
++    assert.equal(f.mes, "2026-10");
++    const esperadas = facturables.filter((x: any) => x.socioId === f.socioId)
++      .map((x: any) => ({ reservaId: x.id, concepto: "Reserva", importe: x.importe }));
++    assert.deepEqual(f.lineas, esperadas);
++    const total = esperadas.reduce((s: number, l: any) => s + l.importe, 0);
++    assert.equal(f.total, total);
++    assert.equal(f.base, Math.round((total * 100) / 121));
++    assert.equal(f.iva, total - f.base);
++  });
++  const facturadas = new Set(facturas.flatMap((f: any) => f.lineas.map((l: any) => l.reservaId)));
++  for (const c of octubre.filter((x: any) => x.estado === "cancelada")) assert.ok(!facturadas.has(c.id), `${c.id} cancelada sin penalización`);
++  for (const n of octubre.filter((x: any) => x.estado === "no_presentada")) assert.ok(facturadas.has(n.id), `${n.id} no presentada`);
++
++  const otra = await generar(api, "2026-10");
++  assert.equal(otra.status, 200);
++  assert.deepEqual(otra.cuerpo.facturas, facturas);
++  assert.equal((await api.pedir("GET", "/_estado")).cuerpo.facturas.length, facturas.length, "no crea facturas nuevas");
++
++  assert.deepEqual((await api.pedir("GET", "/api/facturas?mes=2026-10", { socio: GESTOR })).cuerpo.facturas, facturas);
++  assert.deepEqual((await api.pedir("GET", "/api/facturas?mes=2026-09", { socio: GESTOR })).cuerpo.facturas, []);
++  const una = await api.pedir("GET", `/api/facturas/${facturas[2].numero}`, { socio: GESTOR });
++  assert.equal(una.status, 200);
++  assert.deepEqual(una.cuerpo.factura, facturas[2]);
++  const ninguna = await api.pedir("GET", "/api/facturas/F2026-9999", { socio: GESTOR });
++  assert.equal(ninguna.status, 404);
++  assert.equal(ninguna.cuerpo.error.codigo, "FACTURA_NO_ENCONTRADA");
++
++  // Lo demás no cambia.
++  assert.equal((await api.pedir("GET", "/api/reservas?desde=2026-10-01&hasta=2026-10-31&limite=1")).cuerpo.total, 315);
++}));
++
++test("una cancelación con penalización entra como Penalización y una sin penalización no entra", () => conApi(async (api) => {
++  const forzada = await api.pedir("POST", "/api/reservas/R-0520/cancelar", { cuerpo: { forzar: true } });
++  assert.equal(forzada.cuerpo.reserva.penalizacion, 1200);
++  const gratis = await reservar(api, "socio-003", "pista-3", "2026-11-24T12:00");
++  assert.equal((await api.pedir("POST", `/api/reservas/${gratis.id}/cancelar`)).cuerpo.reserva.estado, "cancelada");
++
++  await reloj(api, "2026-12-01T09:00");
++  const facturas = (await generar(api, "2026-11")).cuerpo.facturas;
++  const marta = facturas.find((f: any) => f.socioId === "socio-002");
++  assert.deepEqual(marta.lineas.find((l: any) => l.reservaId === "R-0520"), { reservaId: "R-0520", concepto: "Penalización", importe: 1200 });
++  assert.ok(!facturas.some((f: any) => f.lineas.some((l: any) => l.reservaId === gratis.id)), "la cancelación gratuita no se factura");
++}));
++
++test("IVA sobre el total: 6.400 céntimos dan base 5.289 e IVA 1.111", () => conApi(async (api) => {
++  // Nora Benítez no tiene reservas: le ponemos 1.800 + 1.800 + 2.800 en diciembre.
++  await reservar(api, "socio-041", "pista-1", "2026-12-01T09:00");
++  await reservar(api, "socio-041", "pista-1", "2026-12-02T09:00");
++  await reservar(api, "socio-041", "pista-1", "2026-12-05T09:00");
++  await reloj(api, "2027-01-05T10:00");
++  const [nora] = (await generar(api, "2026-12")).cuerpo.facturas;
++  assert.deepEqual(nora.lineas.map((l: any) => l.importe), [1800, 1800, 2800]);
++  assert.deepEqual({ total: nora.total, base: nora.base, iva: nora.iva }, { total: 6400, base: 5289, iva: 1111 });
++}));
++
++test("numeración: serie por año del mes facturado, correlativa aunque se genere fuera de orden", () => conApi(async (api) => {
++  await reservar(api, "socio-041", "pista-1", "2026-12-01T09:00");
++  await reservar(api, "socio-003", "pista-3", "2027-01-12T09:00");
++
++  // Diciembre de 2026, generado en enero de 2027, después de noviembre y antes que octubre.
++  await reloj(api, "2027-01-05T10:00");
++  const noviembre = (await generar(api, "2026-11")).cuerpo.facturas;
++  const diciembre = (await generar(api, "2026-12")).cuerpo.facturas;
++  assert.equal(diciembre.length, 1);
++  assert.equal(diciembre[0].numero, `F2026-${String(noviembre.length + 1).padStart(4, "0")}`);
++  const octubre = (await generar(api, "2026-10")).cuerpo.facturas;
++  assert.equal(octubre[0].numero, `F2026-${String(noviembre.length + 2).padStart(4, "0")}`);
++
++  // Un mes sin facturas no gasta números, y repetir tampoco.
++  const septiembre = await generar(api, "2026-09");
++  assert.equal(septiembre.status, 201);
++  assert.deepEqual(septiembre.cuerpo.facturas, []);
++  assert.equal((await generar(api, "2026-09")).status, 200);
++  assert.equal((await generar(api, "2026-11")).status, 200);
++
++  const numeros = [...noviembre, ...diciembre, ...octubre].map((f: any) => f.numero).sort();
++  assert.deepEqual(numeros, numeros.map((_: string, i: number) => `F2026-${String(i + 1).padStart(4, "0")}`), "sin huecos ni repetidos");
++
++  // Enero de 2027 empieza su propia serie.
++  await reloj(api, "2027-02-01T10:00");
++  const enero = (await generar(api, "2027-01")).cuerpo.facturas;
++  assert.deepEqual(enero.map((f: any) => [f.numero, f.socioId]), [["F2027-0001", "socio-003"]]);
++  assert.equal((await api.pedir("GET", "/api/facturas/F2027-0001", { socio: GESTOR })).cuerpo.factura.mes, "2027-01");
++}));

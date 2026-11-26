@@ -54,8 +54,11 @@ VACIAR_CLAUDE = [HOME / ".claude" / d for d in ("skills", "agents", "commands", 
 # Además de los datos del usuario, las demás ejecuciones del laboratorio (SCR/ejecuciones) y las copias que se
 # corrigen con los tests ocultos (SCR/.c): en el piloto, OpenCode sin la skill encontró las reglas de facturación en
 # la carpeta de otra ejecución que corría a la vez. Cada agente solo ve su propia carpeta (se vuelve a montar encima).
-OCULTAR = [HOME / "Projects", HOME / "DevExpert", HOME / ".codex", HOME / ".config", HOME / ".local/share",
-           SCR / "ejecuciones", SCR / ".c"]
+# Segunda fuga, en el lote (26-nov): OpenCode buscó con `find /` y la carpeta compartida de Codex (CODEX_HOME) tenía
+# los rollouts de otras ejecuciones, con el texto de las skills que habían leído, y sus memorias. Ahora se tapa la
+# carpeta entera del laboratorio (SCR) y cada ejecución tiene su propio CODEX_HOME, HOME de Codex y HOME de OpenCode
+# dentro de su carpeta auxiliar. Lo único compartido es auth.json de Codex, montado como fichero.
+OCULTAR = [HOME / "Projects", HOME / "DevExpert", HOME / ".codex", HOME / ".config", HOME / ".local/share", SCR]
 
 
 PROVEEDOR_NAN = {
@@ -68,13 +71,31 @@ PROVEEDOR_NAN = {
 RUTA_SKILL = re.compile(r"skills/([a-z0-9-]+)/SKILL\.md")
 
 
-def caja(cwd: Path, escribibles: list[Path], ocultar: list[Path], vaciar: list[Path] = ()) -> list[str]:
+def codex_propio(aux: Path) -> Path:
+    """Un CODEX_HOME para una ejecución: la configuración, el catálogo de modelos y las skills y plugins que Codex
+    trae de serie, copiados del CODEX_HOME del laboratorio. Sin sesiones, memorias ni bases de datos de otras."""
+    propio = aux / "codex-home"
+    propio.mkdir(parents=True, exist_ok=True)
+    for f in ("config.toml", "models_cache.json", "installation_id"):
+        if (CODEX_HOME / f).exists():
+            shutil.copy(CODEX_HOME / f, propio / f)
+    for d in ("skills", "plugins"):
+        if (CODEX_HOME / d).exists() and not (propio / d).exists():
+            shutil.copytree(CODEX_HOME / d, propio / d, symlinks=True)
+    (propio / "auth.json").touch()
+    return propio
+
+
+def caja(cwd: Path, escribibles: list[Path], ocultar: list[Path], vaciar: list[Path] = (),
+         montar: list[tuple[Path, Path]] = ()) -> list[str]:
     cmd = ["bwrap", "--ro-bind", "/", "/", "--dev", "/dev", "--proc", "/proc", "--tmpfs", "/tmp"]
     for ruta in ocultar:
         if ruta.exists():
             cmd += ["--tmpfs", str(ruta)]
     for ruta in [*escribibles, cwd]:
         cmd += ["--bind", str(ruta), str(ruta)]
+    for origen, destino in montar:
+        cmd += ["--bind", str(origen), str(destino)]
     for ruta in vaciar:
         # Un enlace simbólico apunta a algo que ya está oculto (por ejemplo, ~/.claude/skills a ~/Projects).
         if ruta.is_dir() and not ruta.is_symlink():
@@ -107,12 +128,16 @@ def version(herramienta: str) -> str:
         return f"? ({e})"
 
 
+def cwd_codex_home(cwd: Path) -> Path:
+    return cwd.parent / "logs" / "agente.aux" / "codex-home"
+
+
 def confiar_en_codex(cwd: Path) -> None:
     """Codex solo carga la configuración del proyecto (.codex/agents, los subagentes definidos del caso 3) si la
     carpeta es de confianza. No vale `-c projects…` ni la confianza de una carpeta superior: hace falta su entrada
     en config.toml, que se añade aquí (con cerrojo, porque las ejecuciones comparten CODEX_HOME)."""
     with _ROLLOUTS:
-        config = CODEX_HOME / "config.toml"
+        config = cwd_codex_home(cwd) / "config.toml"
         texto = config.read_text()
         cabecera = f'[projects."{cwd}"]'
         if cabecera not in texto:
@@ -141,11 +166,20 @@ def comando(herramienta: str, prompt: str, cwd: Path, subagentes: bool, aux: Pat
     if herramienta == "claude":
         env["DISABLE_AUTOUPDATER"] = "1"
         fuera = SIEMPRE_FUERA_CLAUDE + ([] if subagentes else SIN_SUBAGENTES_CLAUDE)
-        # Las transcripciones (con el uso completo de cada petición del principal y de cada subagente) van a una
-        # carpeta propia de la ejecución, montada sobre ~/.claude/projects: así tampoco ve las memorias del usuario.
-        (aux / "claude-projects").mkdir(exist_ok=True)
-        cmd = [*caja(cwd, [HOME / ".claude", HOME / ".claude.json"], OCULTAR, VACIAR_CLAUDE),
-               "--bind", str(aux / "claude-projects"), str(HOME / ".claude" / "projects"),
+        # Una carpeta de configuración propia de la ejecución (CLAUDE_CONFIG_DIR), con las transcripciones dentro, y
+        # ~/.claude tapada entera: guarda el historial de ficheros editados (file-history) de las sesiones del
+        # usuario, incluidas las que escribieron las skills de este laboratorio. Solo se comparte el fichero de
+        # credenciales, montado como fichero.
+        conf = aux / "claude-config"
+        (conf / "projects").mkdir(parents=True, exist_ok=True)
+        global_ = json.loads((HOME / ".claude.json").read_text())
+        (conf / ".claude.json").write_text(json.dumps({k: v for k, v in global_.items()
+                                                       if k not in ("projects", "skillUsage", "pluginUsage", "tipsHistory")}))
+        (conf / ".credentials.json").touch()
+        env["CLAUDE_CONFIG_DIR"] = str(conf)
+        cmd = [*caja(cwd, [aux], [*OCULTAR, HOME / ".claude"],
+                     montar=[(HOME / ".claude" / ".credentials.json", conf / ".credentials.json")]),
+               "--ro-bind", "/dev/null", str(HOME / ".claude.json"),
                "claude", "-p", prompt, "--model", modelo, "--output-format", "stream-json", "--verbose",
                *AISLAR_CLAUDE, "--disallowedTools", *fuera, "--session-id", str(uuid.uuid4())]
         return cmd, env
@@ -158,10 +192,12 @@ def comando(herramienta: str, prompt: str, cwd: Path, subagentes: bool, aux: Pat
             activar += ["-c", f'model_catalog_json="{catalogo_sin_subagentes(aux)}"']
         # Codex también va dentro de bubblewrap, para que no vea las demás ejecuciones (su propio sandbox deja leer
         # todo el disco). Dentro de la caja, sin su sandbox: la caja ya solo deja escribir en su carpeta.
-        cmd = [*caja(cwd, [CODEX_HOME, HOME_CODEX, aux], OCULTAR),
+        propio = codex_propio(aux)
+        (aux / "home-codex").mkdir(exist_ok=True)
+        cmd = [*caja(cwd, [aux], [*OCULTAR, HOME / ".claude"], montar=[(CODEX_HOME / "auth.json", propio / "auth.json")]),
                "codex", "exec", "--json", "--skip-git-repo-check", "-m", modelo, "-s", "danger-full-access",
                "-c", f'model_reasoning_effort="{ESFUERZO_CODEX}"', *activar, "-C", str(cwd), prompt]
-        env.update({"HOME": str(HOME_CODEX), "CODEX_HOME": str(CODEX_HOME)})
+        env.update({"HOME": str(aux / "home-codex"), "CODEX_HOME": str(propio)})
         return cmd, env
     clave = os.environ.get("NAN_API_KEY")
     if not clave:
@@ -177,12 +213,13 @@ def comando(herramienta: str, prompt: str, cwd: Path, subagentes: bool, aux: Pat
     for d in ("data", "state"):
         (aux / d).mkdir(parents=True, exist_ok=True)
     dentro = {
-        "HOME": str(HOME_OC), "PATH": env["PATH"], "LANG": "C.UTF-8", "NAN_API_KEY": clave,
+        "HOME": str(aux / "home-oc"), "PATH": env["PATH"], "LANG": "C.UTF-8", "NAN_API_KEY": clave,
         "XDG_CONFIG_HOME": str(aux / "config"), "XDG_DATA_HOME": str(aux / "data"),
-        "XDG_CACHE_HOME": str(HOME_OC / ".cache"), "XDG_STATE_HOME": str(aux / "state"),
+        "XDG_CACHE_HOME": str(aux / "home-oc" / ".cache"), "XDG_STATE_HOME": str(aux / "state"),
         "OPENCODE_DISABLE_CLAUDE_CODE": "1",
     }
-    cmd = [*caja(cwd, [HOME_OC, aux], [*OCULTAR, HOME / ".claude"]), "env", "-i", *[f"{k}={v}" for k, v in dentro.items()],
+    (aux / "home-oc" / ".cache").mkdir(parents=True, exist_ok=True)
+    cmd = [*caja(cwd, [aux], [*OCULTAR, HOME / ".claude"]), "env", "-i", *[f"{k}={v}" for k, v in dentro.items()],
            "opencode", "run", "--standalone", "--auto", "--archived", "--format", "json", "-m", modelo, prompt]
     return cmd, {"PATH": env["PATH"]}
 
@@ -234,7 +271,7 @@ def lanzar(herramienta: str, prompt: str, cwd: Path, log: Path, *, subagentes: b
          "subagentes_activados": subagentes, "duracion_s": round(fin - inicio, 1), "rc": rc,
          "stderr": log.with_suffix(".err").read_text(errors="replace")[-1500:]}
     if herramienta == "claude":
-        m.update(metricas_claude(log, aux / "claude-projects"))
+        m.update(metricas_claude(log, aux / "claude-config" / "projects"))
     elif herramienta == "codex":
         m.update(metricas_codex(log, inicio, fin, aux))
     else:
@@ -474,7 +511,7 @@ def metricas_codex(log: Path, inicio: float, fin: float, aux: Path) -> dict:
     m["respuesta_final"] = textos[-1] if textos else ""
     rollouts = []
     with _ROLLOUTS:
-        for ruta in (CODEX_HOME / "sessions").rglob("rollout-*.jsonl"):
+        for ruta in (aux / "codex-home" / "sessions").rglob("rollout-*.jsonl"):
             if ruta.stat().st_mtime >= inicio - 5:
                 rollouts.append(_rollout(ruta))
     familia = {m["sesion"]}

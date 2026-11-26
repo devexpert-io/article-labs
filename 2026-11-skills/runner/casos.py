@@ -71,6 +71,11 @@ def comprobar(m: dict) -> dict:
     sin_trabajo = not m["total"].get("salida")
     if rechazada and (m.get("error_agente") or sin_trabajo):
         raise FalloAjeno(f"cuota agotada ({m['herramienta']}). {texto[:300]}")
+    # Un corte del runner (timeout o estancado) sin error de la herramienta es un resultado, no un fallo ajeno: en el
+    # lote, OpenCode terminó facturas y se quedó esperando una tarea en segundo plano (background_wait) hasta que el
+    # runner lo cortó. Su respuesta nombra códigos HTTP (401, 403) que la expresión de AJENO confundía con errores.
+    if m.get("rc") in ("timeout", "estancado") and not m.get("error_agente"):
+        return m
     if (m.get("error_agente") or m.get("rc") not in (0, None, "parada")) and AJENO.search(texto):
         if m["herramienta"] == "claude" or m.get("rc") not in (0, "parada") or sin_trabajo:
             raise FalloAjeno(f"{m['herramienta']}: {texto[:400]}")

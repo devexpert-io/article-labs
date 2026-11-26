@@ -1,0 +1,450 @@
+diff --git a/README.md b/README.md
+index 256e5c2..7515db9 100644
+--- a/README.md
++++ b/README.md
+@@ -24,7 +24,8 @@ En el club siempre es miércoles 18 de noviembre de 2026 a las 10:00, salvo que
+ - Para reservar hay que tener la cuota al día (`cuotaActiva`).
+ - Cada socio puede tener como máximo 3 reservas futuras confirmadas.
+ - No se reservan pistas cerradas ni franjas que ya han empezado.
+-- Cancelar es gratis hasta 24 horas antes. Después, solo con `forzar: true`, y se cobra una penalización del 100 % del importe.
++- Cancelar es gratis con 48 horas o más de antelación. Con 24 horas o más, y menos de 48, la penalización es el 25 % del importe. Con menos de 24 horas solo se cancela con `forzar: true`, y la penalización es el 50 % del importe.
++- Un gestor puede eximir de la penalización con `exento: true` y un `motivo` de al menos 10 caracteres, en cualquier momento antes del inicio.
+ 
+ ## API
+ 
+@@ -46,10 +47,14 @@ En el club siempre es miércoles 18 de noviembre de 2026 a las 10:00, salvo que
+ - `GET /api/reservas`: lista reservas con filtros opcionales `fecha`, `desde`, `hasta` (por día de inicio, ambos incluidos), `socio`, `pista` y `estado` (`confirmada`, `cancelada` o `no_presentada`), paginada con `limite` (1 a 100, 50 por defecto) y `pagina`. Responde `{ total, pagina, paginas, reservas }`.
+ - `GET /api/reservas/:id`: una reserva. Responde `{ reserva }`.
+ - `POST /api/reservas` con `{ socioId, pistaId, inicio, notas? }`: crea una reserva. Responde `201 { reserva }`. Errores: `SOCIO_NO_ENCONTRADO`, `PISTA_NO_ENCONTRADA`, `FRANJA_INVALIDA`, `CUOTA_INACTIVA`, `PISTA_CERRADA`, `FRANJA_PASADA`, `FRANJA_NO_DISPONIBLE` y `LIMITE_DE_RESERVAS`.
+-- `POST /api/reservas/:id/cancelar` con `{ forzar?, motivo? }`: cancela una reserva. Responde `{ reserva }`. Errores: `RESERVA_NO_ENCONTRADA`, `YA_CANCELADA`, `RESERVA_PASADA` y `FUERA_DE_PLAZO`.
++- `POST /api/reservas/:id/cancelar` con `{ forzar?, motivo?, exento? }`: cancela una reserva. Responde `{ reserva, reembolso }`, con `reembolso` igual a `importe - penalizacion`. `exento: true` exime de la penalización (solo gestores y con `motivo` de al menos 10 caracteres). Errores: `RESERVA_NO_ENCONTRADA`, `YA_CANCELADA`, `RESERVA_PASADA`, `FUERA_DE_PLAZO`, `DATOS_INVALIDOS`, `NO_IDENTIFICADO` y `SIN_PERMISO`.
+ 
+ Una reserva tiene `id`, `socioId`, `pistaId`, `inicio`, `fin`, `estado`, `importe`, `notas` y, si se canceló, `penalizacion` y `motivoCancelacion`.
+ 
++### Informe de caja
++
++- `GET /api/informes/caja?mes=AAAA-MM`: el informe de caja del mes, por fecha de inicio de las reservas. Solo gestores. Responde `{ mes, pistas, total }`: `pistas` tiene una entrada por pista (ordenadas por id), con `pistaId`, `reservas`, `ingresos`, `penalizaciones` y `total`; `total` agrega esos mismos cuatro campos para todo el club. Errores: `NO_IDENTIFICADO`, `SIN_PERMISO` y `DATOS_INVALIDOS`.
++
+ ### Solo para pruebas
+ 
+ - `GET /_estado`: el estado completo del club.
+diff --git a/src/nucleo.ts b/src/nucleo.ts
+index 62ed37b..05cdcc8 100644
+--- a/src/nucleo.ts
++++ b/src/nucleo.ts
+@@ -1,6 +1,6 @@
+ // Las operaciones del club y sus reglas. La API HTTP (src/servidor.ts) es la única que las llama.
+ import { finDeFranja, HORAS, precio } from "./semilla.ts";
+-import type { Estado, EstadoReserva, Reserva } from "./tipos.ts";
++import type { Estado, EstadoReserva, Reserva, Socio } from "./tipos.ts";
+ 
+ export class ErrorDelClub extends Error {
+   codigo: string;
+@@ -14,10 +14,14 @@ export class ErrorDelClub extends Error {
+ 
+ const FECHA = /^\d{4}-\d{2}-\d{2}$/;
+ const FECHA_HORA = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}$/;
++const MES = /^\d{4}-\d{2}$/;
+ export const LIMITE_MAXIMO = 100;
+ export const LIMITE_POR_DEFECTO = 50;
+ export const MAXIMO_RESERVAS_FUTURAS = 3;
+-export const HORAS_CANCELACION_GRATUITA = 24;
++export const HORAS_GRATUITAS = 48;
++export const HORAS_PARCIALES = 24;
++export const PENALIZACION_PARCIAL = 0.25;
++export const PENALIZACION_COMPLETA = 0.5;
+ 
+ function invalido(mensaje: string): never {
+   throw new ErrorDelClub("DATOS_INVALIDOS", mensaje, 400);
+@@ -27,8 +31,43 @@ function sinAcentos(texto: string): string {
+   return texto.toLowerCase().normalize("NFD").replace(/[̀-ͯ]/g, "");
+ }
+ 
++const ZONA = "Europe/Madrid";
++
++/** Desfase de Madrid respecto a UTC, en minutos, para un instante concreto. */
++function offsetMadridMinutos(fecha: Date): number {
++  const partes = new Intl.DateTimeFormat("en-GB", {
++    timeZone: ZONA,
++    year: "numeric",
++    month: "2-digit",
++    day: "2-digit",
++    hour: "2-digit",
++    minute: "2-digit",
++    second: "2-digit",
++    hourCycle: "h23",
++  }).formatToParts(fecha);
++  const valor = (tipo: string) => Number(partes.find((p) => p.type === tipo)!.value);
++  const enUtc = Date.UTC(valor("year"), valor("month") - 1, valor("day"), valor("hour"), valor("minute"), valor("second"));
++  return Math.round((enUtc - fecha.getTime()) / 60_000);
++}
++
++/** Convierte una hora local de Madrid ("AAAA-MM-DDTHH:MM") a milisegundos desde la época (UTC). */
++function aUtcMadrid(texto: string): number {
++  const [fecha, hora] = texto.split("T");
++  const [anio, mes, dia] = fecha!.split("-").map(Number);
++  const [hh, mm] = hora!.split(":").map(Number);
++  const comoUtc = Date.UTC(anio!, mes! - 1, dia!, hh!, mm!, 0);
++  let utc = comoUtc;
++  for (let i = 0; i < 3; i++) {
++    const siguiente = comoUtc - offsetMadridMinutos(new Date(utc)) * 60_000;
++    if (siguiente === utc) break;
++    utc = siguiente;
++  }
++  return utc;
++}
++
++/** Horas reales entre dos horas locales de Madrid, contando el cambio de hora. */
+ function horasEntre(desde: string, hasta: string): number {
+-  return (Date.parse(`${hasta}:00Z`) - Date.parse(`${desde}:00Z`)) / 3_600_000;
++  return (aUtcMadrid(hasta) - aUtcMadrid(desde)) / 3_600_000;
+ }
+ 
+ export interface FiltrosReservas {
+@@ -160,25 +199,56 @@ export function crearClub(estado: Estado) {
+       return { reserva: nueva };
+     },
+ 
+-    cancelarReserva(id: string, datos: { forzar?: unknown; motivo?: unknown }) {
++    cancelarReserva(id: string, datos: { forzar?: unknown; motivo?: unknown; exento?: unknown }, quien?: Socio) {
+       const r = reserva(id);
+       if (datos.forzar !== undefined && typeof datos.forzar !== "boolean") invalido("forzar debe ser true o false");
++      if (datos.exento !== undefined && typeof datos.exento !== "boolean") invalido("exento debe ser true o false");
+       if (r.estado === "cancelada") throw new ErrorDelClub("YA_CANCELADA", "La reserva ya estaba cancelada");
+       if (r.inicio <= estado.ahora) throw new ErrorDelClub("RESERVA_PASADA", "La reserva ya ha empezado o ha pasado");
+       const horas = horasEntre(estado.ahora, r.inicio);
+-      if (horas < HORAS_CANCELACION_GRATUITA) {
+-        if (datos.forzar !== true) {
+-          throw new ErrorDelClub(
+-            "FUERA_DE_PLAZO",
+-            `Faltan ${Math.floor(horas)} horas para la reserva y la cancelación gratuita termina ${HORAS_CANCELACION_GRATUITA} horas antes. ` +
+-            "Con forzar se cancela con una penalización del 100 % del importe: solo si el socio ha aceptado expresamente la penalización.",
+-          );
++      if (datos.exento === true) {
++        if (typeof datos.motivo !== "string" || datos.motivo.length < 10) {
++          invalido("motivo es obligatorio, con al menos 10 caracteres, para eximir la penalización");
++        }
++        if (!quien) throw new ErrorDelClub("NO_IDENTIFICADO", "No se sabe quién llama", 401);
++        if (quien.rol !== "gestor") throw new ErrorDelClub("SIN_PERMISO", "Solo un gestor puede eximir de la penalización", 403);
++      } else if (horas < HORAS_GRATUITAS) {
++        if (horas < HORAS_PARCIALES) {
++          if (datos.forzar !== true) {
++            throw new ErrorDelClub(
++              "FUERA_DE_PLAZO",
++              `Faltan ${Math.floor(horas)} horas para la reserva y la cancelación gratuita termina ${HORAS_GRATUITAS} horas antes. ` +
++              "Con forzar se cancela con una penalización del 50 % del importe: solo si el socio ha aceptado expresamente la penalización.",
++            );
++          }
++          r.penalizacion = Math.round(r.importe * PENALIZACION_COMPLETA);
++        } else {
++          r.penalizacion = Math.round(r.importe * PENALIZACION_PARCIAL);
+         }
+-        r.penalizacion = r.importe;
+       }
+       r.estado = "cancelada";
+       if (typeof datos.motivo === "string") r.motivoCancelacion = datos.motivo;
+-      return { reserva: r };
++      const penalizacion = r.penalizacion ?? 0;
++      return { reserva: r, reembolso: r.importe - penalizacion };
++    },
++
++    informeCaja(mes: unknown, quien?: Socio) {
++      if (typeof mes !== "string" || !MES.test(mes)) invalido("mes debe tener el formato AAAA-MM");
++      if (!quien) throw new ErrorDelClub("NO_IDENTIFICADO", "No se sabe quién llama", 401);
++      if (quien.rol !== "gestor") throw new ErrorDelClub("SIN_PERMISO", "Solo un gestor puede consultar el informe de caja", 403);
++      const delMes = estado.reservas.filter((r) => r.inicio.slice(0, 7) === mes);
++      const fila = (rs: Reserva[]) => {
++        const cobradas = rs.filter((r) => r.estado !== "cancelada");
++        const ingresos = cobradas.reduce((suma, r) => suma + r.importe, 0);
++        const penalizaciones = rs.filter((r) => r.estado === "cancelada").reduce((suma, r) => suma + (r.penalizacion ?? 0), 0);
++        return { reservas: cobradas.length, ingresos, penalizaciones, total: ingresos + penalizaciones };
++      };
++      const pistas = estado.pistas.map((p) => ({
++        pistaId: p.id,
++        ...fila(delMes.filter((r) => r.pistaId === p.id)),
++      }));
++      pistas.sort((a, b) => a.pistaId.localeCompare(b.pistaId));
++      return { mes, pistas, total: fila(delMes) };
+     },
+   };
+ }
+diff --git a/src/servidor.ts b/src/servidor.ts
+index a6a7764..bd97a6d 100644
+--- a/src/servidor.ts
++++ b/src/servidor.ts
+@@ -44,8 +44,8 @@ function identificar(req: IncomingMessage): Socio | undefined {
+ 
+ type Operacion = { nombre: string; argumentos: unknown; ejecutar: () => unknown };
+ 
+-// `quien` es el socio que hace la petición (cabecera X-Socio). Las operaciones actuales no lo usan.
+-async function resolver(req: IncomingMessage, url: URL, _quien: Socio | undefined): Promise<Operacion> {
++// `quien` es el socio que hace la petición (cabecera X-Socio). Lo usan la exención y el informe de caja.
++async function resolver(req: IncomingMessage, url: URL, quien: Socio | undefined): Promise<Operacion> {
+   const metodo = req.method ?? "GET";
+   const partes = url.pathname.split("/").filter(Boolean);
+   const q = url.searchParams;
+@@ -89,7 +89,11 @@ async function resolver(req: IncomingMessage, url: URL, _quien: Socio | undefine
+   }
+   if (recurso === "reservas" && id && accion === "cancelar" && metodo === "POST") {
+     const cuerpo = await leerCuerpo(req);
+-    return { nombre: "cancelarReserva", argumentos: { reservaId: id, ...cuerpo }, ejecutar: () => club.cancelarReserva(id, cuerpo) };
++    return { nombre: "cancelarReserva", argumentos: { reservaId: id, ...cuerpo }, ejecutar: () => club.cancelarReserva(id, cuerpo, quien) };
++  }
++  if (recurso === "informes" && id === "caja" && !accion && metodo === "GET") {
++    const mes = q.get("mes") ?? undefined;
++    return { nombre: "informeCaja", argumentos: { mes }, ejecutar: () => club.informeCaja(mes, quien) };
+   }
+   throw new ErrorDelClub("RUTA_NO_ENCONTRADA", `No existe ${metodo} ${url.pathname}`, 404);
+ }
+diff --git a/test/club.test.ts b/test/club.test.ts
+index 5dc8821..19fdb6d 100644
+--- a/test/club.test.ts
++++ b/test/club.test.ts
+@@ -37,16 +37,18 @@ test("reservar sigue las reglas del club", async () => {
+   assert.equal(pasada.cuerpo.error.codigo, "FRANJA_PASADA");
+ });
+ 
+-test("cancelar: gratis hasta 24 horas antes y, después, solo con forzar y penalización", async () => {
++test("cancelar: gratis con 48 horas o más y, con menos de 24, solo con forzar y penalización del 50 %", async () => {
+   const fuera = await api.pedir("POST", "/api/reservas/R-0520/cancelar");
+   assert.equal(fuera.status, 409);
+   assert.equal(fuera.cuerpo.error.codigo, "FUERA_DE_PLAZO");
+   const forzada = await api.pedir("POST", "/api/reservas/R-0520/cancelar", { cuerpo: { forzar: true } });
+-  assert.equal(forzada.cuerpo.reserva.penalizacion, 1200);
++  assert.equal(forzada.cuerpo.reserva.penalizacion, 600);
++  assert.equal(forzada.cuerpo.reembolso, 600);
+   const nueva = await api.pedir("POST", "/api/reservas", { cuerpo: { socioId: "socio-003", pistaId: "pista-3", inicio: "2026-11-24T12:00" } });
+   const gratis = await api.pedir("POST", `/api/reservas/${nueva.cuerpo.reserva.id}/cancelar`);
+   assert.equal(gratis.cuerpo.reserva.estado, "cancelada");
+   assert.equal(gratis.cuerpo.reserva.penalizacion, undefined);
++  assert.equal(gratis.cuerpo.reembolso, nueva.cuerpo.reserva.importe);
+ });
+ 
+ test("la cabecera X-Socio identifica a quien llama", async () => {
+diff --git a/test/reembolsos.test.ts b/test/reembolsos.test.ts
+new file mode 100644
+index 0000000..0fe71e0
+--- /dev/null
++++ b/test/reembolsos.test.ts
+@@ -0,0 +1,221 @@
++// La política de cancelación escalonada, la exención y el informe de caja, probadas a través de la API.
++import assert from "node:assert/strict";
++import { test } from "node:test";
++import { arrancarApi, type Api } from "./ayuda.ts";
++
++async function crearReserva(api: Api, inicio: string, pistaId = "pista-1", socioId = "socio-041") {
++  const respuesta = await api.pedir("POST", "/api/reservas", { cuerpo: { socioId, pistaId, inicio } });
++  assert.equal(respuesta.status, 201, JSON.stringify(respuesta.cuerpo));
++  return respuesta.cuerpo.reserva as { id: string; importe: number };
++}
++
++test("cancelar aplica la penalización escalonada por tramos", async () => {
++  const api = await arrancarApi();
++  try {
++    // Con 48 horas o más de antelación: sin penalización.
++    const lejos = await crearReserva(api, "2026-12-10T12:00", "pista-1");
++    const gratis = await api.pedir("POST", `/api/reservas/${lejos.id}/cancelar`);
++    assert.equal(gratis.status, 200);
++    assert.equal(gratis.cuerpo.reserva.penalizacion, undefined);
++    assert.equal(gratis.cuerpo.reembolso, lejos.importe);
++
++    // Entre 24 y 48 horas: 25 % del importe, sin forzar.
++    const parcial = await crearReserva(api, "2026-12-11T18:00", "pista-1");
++    await api.pedir("POST", "/_reloj", { cuerpo: { ahora: "2026-12-10T12:00" } });
++    const al25 = await api.pedir("POST", `/api/reservas/${parcial.id}/cancelar`);
++    assert.equal(al25.status, 200);
++    assert.equal(al25.cuerpo.reserva.penalizacion, parcial.importe * 0.25);
++    assert.equal(al25.cuerpo.reembolso, parcial.importe * 0.75);
++
++    // Con menos de 24 horas: exige forzar y penaliza el 50 %.
++    const tarde = await crearReserva(api, "2026-12-11T21:00", "pista-2");
++    await api.pedir("POST", "/_reloj", { cuerpo: { ahora: "2026-12-11T19:00" } });
++    const sinForzar = await api.pedir("POST", `/api/reservas/${tarde.id}/cancelar`);
++    assert.equal(sinForzar.status, 409);
++    assert.equal(sinForzar.cuerpo.error.codigo, "FUERA_DE_PLAZO");
++    const forzada = await api.pedir("POST", `/api/reservas/${tarde.id}/cancelar`, { cuerpo: { forzar: true } });
++    assert.equal(forzada.cuerpo.reserva.penalizacion, tarde.importe * 0.5);
++    assert.equal(forzada.cuerpo.reembolso, tarde.importe * 0.5);
++  } finally {
++    api.cerrar();
++  }
++});
++
++test("los límites exactos de 48 y 24 horas", async () => {
++  const api = await arrancarApi();
++  try {
++    // A 48 horas justas no hay penalización.
++    const a48 = await crearReserva(api, "2026-12-10T12:00", "pista-1");
++    await api.pedir("POST", "/_reloj", { cuerpo: { ahora: "2026-12-08T12:00" } });
++    const gratis = await api.pedir("POST", `/api/reservas/${a48.id}/cancelar`);
++    assert.equal(gratis.cuerpo.reserva.penalizacion, undefined);
++
++    // A 24 horas justas se aplica el 25 % y no hace falta forzar.
++    const a24 = await crearReserva(api, "2026-12-11T12:00", "pista-1");
++    await api.pedir("POST", "/_reloj", { cuerpo: { ahora: "2026-12-10T12:00" } });
++    const parcial = await api.pedir("POST", `/api/reservas/${a24.id}/cancelar`);
++    assert.equal(parcial.cuerpo.reserva.penalizacion, a24.importe * 0.25);
++  } finally {
++    api.cerrar();
++  }
++});
++
++test("la antelación se cuenta en horas reales de Madrid, con el cambio de hora", async () => {
++  const api = await arrancarApi({ AHORA: "2027-03-26T20:30" });
++  try {
++    // Del viernes 26 a las 20:30 al domingo 28 a las 21:00 hay 47,5 horas reales, no 48,5.
++    const reserva = await crearReserva(api, "2027-03-28T21:00", "pista-1");
++    const cancelada = await api.pedir("POST", `/api/reservas/${reserva.id}/cancelar`);
++    assert.equal(cancelada.status, 200);
++    assert.equal(cancelada.cuerpo.reserva.penalizacion, reserva.importe * 0.25);
++    assert.equal(cancelada.cuerpo.reembolso, reserva.importe * 0.75);
++  } finally {
++    api.cerrar();
++  }
++});
++
++test("un gestor puede eximir la penalización con motivo", async () => {
++  const api = await arrancarApi();
++  try {
++    const reserva = await crearReserva(api, "2026-11-24T12:00", "pista-1");
++    await api.pedir("POST", "/_reloj", { cuerpo: { ahora: "2026-11-24T10:00" } }); // faltan 2 horas
++
++    // Sin identificarse: 401.
++    const anonimo = await api.pedir("POST", `/api/reservas/${reserva.id}/cancelar`, {
++      cuerpo: { exento: true, motivo: "El socio avisó con tiempo suficiente por teléfono" },
++    });
++    assert.equal(anonimo.status, 401);
++    assert.equal(anonimo.cuerpo.error.codigo, "NO_IDENTIFICADO");
++
++    // Un socio que no es gestor: 403.
++    const socio = await api.pedir("POST", `/api/reservas/${reserva.id}/cancelar`, {
++      cuerpo: { exento: true, motivo: "El socio avisó con tiempo suficiente por teléfono" },
++      socio: "socio-003",
++    });
++    assert.equal(socio.status, 403);
++    assert.equal(socio.cuerpo.error.codigo, "SIN_PERMISO");
++
++    // Motivo corto o ausente: 400.
++    const corto = await api.pedir("POST", `/api/reservas/${reserva.id}/cancelar`, {
++      cuerpo: { exento: true, motivo: "corto" },
++      socio: "socio-040",
++    });
++    assert.equal(corto.status, 400);
++    assert.equal(corto.cuerpo.error.codigo, "DATOS_INVALIDOS");
++    const sinMotivo = await api.pedir("POST", `/api/reservas/${reserva.id}/cancelar`, {
++      cuerpo: { exento: true },
++      socio: "socio-040",
++    });
++    assert.equal(sinMotivo.status, 400);
++    assert.equal(sinMotivo.cuerpo.error.codigo, "DATOS_INVALIDOS");
++
++    // Gestor con motivo válido: cancela sin penalización y guarda el motivo.
++    const exenta = await api.pedir("POST", `/api/reservas/${reserva.id}/cancelar`, {
++      cuerpo: { exento: true, motivo: "El socio avisó con tiempo suficiente por teléfono" },
++      socio: "socio-040",
++    });
++    assert.equal(exenta.status, 200);
++    assert.equal(exenta.cuerpo.reserva.estado, "cancelada");
++    assert.equal(exenta.cuerpo.reserva.penalizacion, undefined);
++    assert.equal(exenta.cuerpo.reserva.motivoCancelacion, "El socio avisó con tiempo suficiente por teléfono");
++    assert.equal(exenta.cuerpo.reembolso, reserva.importe);
++  } finally {
++    api.cerrar();
++  }
++});
++
++test("una reserva que ya ha empezado no se cancela, ni con exento", async () => {
++  const api = await arrancarApi();
++  try {
++    const reserva = await crearReserva(api, "2026-12-10T12:00", "pista-1");
++    await api.pedir("POST", "/_reloj", { cuerpo: { ahora: "2026-12-10T12:00" } });
++
++    const pasada = await api.pedir("POST", `/api/reservas/${reserva.id}/cancelar`);
++    assert.equal(pasada.status, 409);
++    assert.equal(pasada.cuerpo.error.codigo, "RESERVA_PASADA");
++
++    const exenta = await api.pedir("POST", `/api/reservas/${reserva.id}/cancelar`, {
++      cuerpo: { exento: true, motivo: "El socio avisó con tiempo suficiente por teléfono" },
++      socio: "socio-040",
++    });
++    assert.equal(exenta.status, 409);
++    assert.equal(exenta.cuerpo.error.codigo, "RESERVA_PASADA");
++  } finally {
++    api.cerrar();
++  }
++});
++
++test("el informe de caja es solo para gestores y valida el mes", async () => {
++  const api = await arrancarApi();
++  try {
++    const anonimo = await api.pedir("GET", "/api/informes/caja?mes=2026-11");
++    assert.equal(anonimo.status, 401);
++    assert.equal(anonimo.cuerpo.error.codigo, "NO_IDENTIFICADO");
++
++    const socio = await api.pedir("GET", "/api/informes/caja?mes=2026-11", { socio: "socio-003" });
++    assert.equal(socio.status, 403);
++    assert.equal(socio.cuerpo.error.codigo, "SIN_PERMISO");
++
++    const mal = await api.pedir("GET", "/api/informes/caja?mes=2026/11", { socio: "socio-040" });
++    assert.equal(mal.status, 400);
++    assert.equal(mal.cuerpo.error.codigo, "DATOS_INVALIDOS");
++  } finally {
++    api.cerrar();
++  }
++});
++
++test("el informe de caja suma ingresos y penalizaciones por pista", async () => {
++  const api = await arrancarApi({ AHORA: "2026-12-01T10:00" });
++  try {
++    const r1 = await crearReserva(api, "2026-12-10T09:00", "pista-1");
++    const r2 = await crearReserva(api, "2026-12-11T18:00", "pista-2");
++    await api.pedir("POST", "/_reloj", { cuerpo: { ahora: "2026-12-11T16:00" } });
++    const cancelada = await api.pedir("POST", `/api/reservas/${r2.id}/cancelar`, { cuerpo: { forzar: true } });
++    assert.equal(cancelada.cuerpo.reserva.penalizacion, r2.importe * 0.5);
++
++    const informe = await api.pedir("GET", "/api/informes/caja?mes=2026-12", { socio: "socio-040" });
++    assert.equal(informe.status, 200);
++    assert.equal(informe.cuerpo.mes, "2026-12");
++    assert.deepEqual(
++      informe.cuerpo.pistas.map((p: { pistaId: string }) => p.pistaId),
++      ["pista-1", "pista-2", "pista-3", "pista-4"],
++    );
++    const porId = Object.fromEntries(informe.cuerpo.pistas.map((p: { pistaId: string }) => [p.pistaId, p]));
++    assert.deepEqual(porId["pista-1"], { pistaId: "pista-1", reservas: 1, ingresos: r1.importe, penalizaciones: 0, total: r1.importe });
++    assert.deepEqual(porId["pista-2"], { pistaId: "pista-2", reservas: 0, ingresos: 0, penalizaciones: r2.importe * 0.5, total: r2.importe * 0.5 });
++    assert.deepEqual(porId["pista-3"], { pistaId: "pista-3", reservas: 0, ingresos: 0, penalizaciones: 0, total: 0 });
++    assert.deepEqual(porId["pista-4"], { pistaId: "pista-4", reservas: 0, ingresos: 0, penalizaciones: 0, total: 0 });
++    assert.deepEqual(informe.cuerpo.total, {
++      reservas: 1,
++      ingresos: r1.importe,
++      penalizaciones: r2.importe * 0.5,
++      total: r1.importe + r2.importe * 0.5,
++    });
++  } finally {
++    api.cerrar();
++  }
++});
++
++test("el informe de caja cuenta las no presentadas como ingreso", async () => {
++  const api = await arrancarApi();
++  try {
++    const estado = await api.pedir("GET", "/_estado");
++    const informe = await api.pedir("GET", "/api/informes/caja?mes=2026-11", { socio: "socio-040" });
++
++    const delMes = estado.cuerpo.reservas.filter((r: { inicio: string }) => r.inicio.startsWith("2026-11"));
++    const cobradas = delMes.filter((r: { estado: string }) => r.estado !== "cancelada");
++    const ingresos = cobradas.reduce((suma: number, r: { importe: number }) => suma + r.importe, 0);
++    const penalizaciones = delMes
++      .filter((r: { estado: string }) => r.estado === "cancelada")
++      .reduce((suma: number, r: { penalizacion?: number }) => suma + (r.penalizacion ?? 0), 0);
++
++    assert.deepEqual(informe.cuerpo.total, {
++      reservas: cobradas.length,
++      ingresos,
++      penalizaciones,
++      total: ingresos + penalizaciones,
++    });
++  } finally {
++    api.cerrar();
++  }
++});
